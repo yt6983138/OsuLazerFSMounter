@@ -8,7 +8,7 @@ public struct VirtualPath
 	/// <summary>
 	/// immutable
 	/// </summary>
-	public readonly string[] DirectorySegments => this.FullSegments.Length > 1 ? this.FullSegments[..^1] : [];
+	public readonly Span<string> DirectorySegments => this.FullSegments.Length > 1 ? this.FullSegments[..^1] : [];
 
 	public VirtualPath(string path)
 	{
@@ -22,8 +22,11 @@ public struct VirtualPath
 	public static VirtualPath FromDirectory(string path)
 	{
 		string[] pathSegments = BreakIntoDirectoryPathsAndSanitize(path, false);
-		Array.Resize(ref pathSegments, pathSegments.Length + 1);
-		pathSegments[^1] = "";
+		if (pathSegments.Length == 0 || !string.IsNullOrEmpty(pathSegments[^1]))
+		{
+			Array.Resize(ref pathSegments, pathSegments.Length + 1);
+			pathSegments[^1] = "";
+		}
 		return new(pathSegments);
 	}
 	public static VirtualPath FromFile(string path)
@@ -31,20 +34,15 @@ public struct VirtualPath
 		string[] pathSegments = BreakIntoDirectoryPathsAndSanitize(path, false);
 		return new(pathSegments);
 	}
-	public static VirtualPath FromDirectoryOrFile(string path)
-	{
-		string[] pathSegments = BreakIntoDirectoryPathsAndSanitize(path);
-		return new(pathSegments);
-	}
 
-	public override string ToString()
+	public override readonly string ToString()
 	{
 		return $"{string.Join('/', this.FullSegments)}";
 	}
 
 	public readonly VirtualPath AppendDirectory(params IEnumerable<string> segments)
 	{
-		return new(this.DirectorySegments.Concat(segments).Append(this.FileName).ToArray());
+		return new(this.DirectorySegments.ToArray().Concat(segments).Append(this.FileName).ToArray());
 	}
 	public readonly VirtualPath Append(params IEnumerable<string> segments)
 	{

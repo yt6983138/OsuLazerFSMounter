@@ -4,6 +4,7 @@ public class DirectoryDescriptor : IDescriptor
 {
 	public VirtualDirectory Directory { get; set; }
 	public ScopedSemaphoreSlim Lock { get; } = new(1, 1);
+	public bool DeleteOnClose { get; set; }
 
 	IVirtualFileSystemObject IDescriptor.VirtualObject => this.Directory;
 

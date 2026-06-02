@@ -73,15 +73,16 @@ public class VirtualDirectory : IVirtualFileSystemObject
 
 		return this.FindDirectoryInternal(path.DirectorySegments, 0);
 	}
-	private VirtualDirectory? FindDirectoryInternal(string[] paths, int index)
+	private VirtualDirectory? FindDirectoryInternal(Span<string> paths, int index)
 	{
+		string current = paths[index];
 		if (index == paths.Length - 1)
 		{
-			return this.Subdirectories.FirstOrDefault(d => d.Name == paths[index]);
+			return this.Subdirectories.FirstOrDefault(d => d.Name == current);
 		}
 		else
 		{
-			VirtualDirectory? subdir = this.Subdirectories.FirstOrDefault(d => d.Name == paths[index]);
+			VirtualDirectory? subdir = this.Subdirectories.FirstOrDefault(d => d.Name == current);
 			if (subdir is null)
 				return null;
 			return subdir.FindDirectoryInternal(paths, index + 1);
@@ -133,17 +134,18 @@ public class VirtualDirectory : IVirtualFileSystemObject
 			return false;
 		return this.RemoveDirectoryInternal(path.DirectorySegments, 0);
 	}
-	private bool RemoveDirectoryInternal(string[] paths, int index)
+	private bool RemoveDirectoryInternal(Span<string> paths, int index)
 	{
+		string current = paths[index];
 		if (index == paths.Length - 1)
 		{
-			bool hasAny = this._subdirectories.Any(d => d.Name == paths[index]);
-			this._subdirectories.RemoveAll(d => d.Name == paths[index]);
+			bool hasAny = this._subdirectories.Any(d => d.Name == current);
+			this._subdirectories.RemoveAll(d => d.Name == current);
 			return hasAny;
 		}
 		else
 		{
-			VirtualDirectory? subdir = this.Subdirectories.FirstOrDefault(d => d.Name == paths[index]);
+			VirtualDirectory? subdir = this.Subdirectories.FirstOrDefault(d => d.Name == current);
 			if (subdir is null)
 				return false;
 			return subdir.RemoveDirectoryInternal(paths, index + 1);
@@ -162,7 +164,7 @@ public class VirtualDirectory : IVirtualFileSystemObject
 
 		this.AddInternal(pathOrEmpty.DirectorySegments, 0, file);
 	}
-	private VirtualFile AddInternal(string[] paths, int index, VirtualFile file)
+	private VirtualFile AddInternal(Span<string> paths, int index, VirtualFile file)
 	{
 		if (index == paths.Length)
 		{
@@ -172,10 +174,11 @@ public class VirtualDirectory : IVirtualFileSystemObject
 		}
 		else
 		{
-			VirtualDirectory? subdir = this.Subdirectories.FirstOrDefault(d => d.Name == paths[index]);
+			string current = paths[index];
+			VirtualDirectory? subdir = this.Subdirectories.FirstOrDefault(d => d.Name == current);
 			if (subdir is null)
 			{
-				subdir = new VirtualDirectory(paths[index])
+				subdir = new VirtualDirectory(current)
 				{
 					Parent = this
 				};
@@ -207,9 +210,9 @@ public class VirtualDirectory : IVirtualFileSystemObject
 		if (path.DirectorySegments.Length == 0)
 			return this;
 
-		return this.AddDirectoryInternal(path.DirectorySegments[..^1], new VirtualDirectory(path.DirectorySegments.Last()), 0);
+		return this.AddDirectoryInternal(path.DirectorySegments[..^1], new VirtualDirectory(path.DirectorySegments[^1]), 0);
 	}
-	private VirtualDirectory AddDirectoryInternal(string[] paths, VirtualDirectory dir, int index)
+	private VirtualDirectory AddDirectoryInternal(Span<string> paths, VirtualDirectory dir, int index)
 	{
 		if (index == paths.Length)
 		{
@@ -223,10 +226,11 @@ public class VirtualDirectory : IVirtualFileSystemObject
 		}
 		else
 		{
-			VirtualDirectory? subdir = this.Subdirectories.FirstOrDefault(d => d.Name == paths[index]);
+			string current = paths[index];
+			VirtualDirectory? subdir = this.Subdirectories.FirstOrDefault(d => d.Name == current);
 			if (subdir is null)
 			{
-				subdir = new VirtualDirectory(paths[index])
+				subdir = new VirtualDirectory(current)
 				{
 					Parent = this
 				};

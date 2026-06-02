@@ -6,6 +6,7 @@ using osu.Game.Database;
 using osu.Game.Models;
 using osu.Game.Skinning;
 using OsuLazerFSMounter.FileSystem;
+using System.Collections.Frozen;
 using System.Security.AccessControl;
 using FileAttributes_t = System.IO.FileAttributes; // bruh fsp uses pascal case parameter for some reason
 using FileInfo = System.IO.FileInfo;
@@ -29,9 +30,8 @@ public class OsuVFS : FileSystemBase
 	private record class PartialSkinInfo(Guid ID, string Name, RealmFileInfo[] Files);
 
 	private readonly ILogger<OsuVFS> _logger;
-	private readonly List<IDescriptor> _openDescriptors = [];
-	private readonly ScopedSemaphoreSlim _descriptorLock = new(1, 1);
 	private readonly ScopedSemaphoreSlim _rootDirectoryLock = new(1, 1);
+	private readonly FrozenDictionary<string, DirectoryInfo> _cachedHashDirectories;
 
 	public VirtualDirectory RootDirectory { get; set; } = new("");
 
@@ -44,6 +44,10 @@ public class OsuVFS : FileSystemBase
 		this.RealmAccess = realm;
 		this.FilesFolder = hashFileStorage;
 		this._logger = logger;
+		this._cachedHashDirectories = hashFileStorage.GetDirectories()
+			.Where(x => x.Name.Length == 1 && char.IsAsciiHexDigitLower(x.Name[0]))
+			.SelectMany(y => y.GetDirectories().Where(x => x.Name.Length == 2 && x.Name.All(char.IsAsciiHexDigitLower)))
+			.ToFrozenDictionary(x => x.Name, x => x);
 	}
 
 	private static string SanitizeFileName(string name)
@@ -57,16 +61,37 @@ public class OsuVFS : FileSystemBase
 
 	private FileInfo FindPhysical(string hash)
 	{
-		string first = hash[0].ToString();
 		string firstTwo = hash[..2];
 
-		FileInfo info = this.FilesFolder
-			.GetDirectories().First(x => x.Name == first)
-			.GetDirectories().First(x => x.Name == firstTwo)
-			.GetFiles().First(x => x.Name == hash);
-
-		return info;
+		return this._cachedHashDirectories[firstTwo].EnumerateFiles(hash).First(x => x.Name == hash);
 	}
+	// this was used to test if lazy works better, currently reserved
+	private static Task PreFetchFileInfoForFilesInBackground(VirtualDirectory dir)
+	{
+		return Task.Run(() => PreFetchDirectoryCore(dir));
+
+		static void PreFetchDirectoryCore(VirtualDirectory dir)
+		{
+			for (int i = 0; i < dir.Subdirectories.Count; i++)
+			{
+				try
+				{
+					PreFetchDirectoryCore(dir.Subdirectories[i]);
+				}
+				catch { }
+			}
+
+			for (int i = 0; i < dir.Files.Count; i++)
+			{
+				try
+				{
+					_ = dir.Files[i].PhysicalFile;
+				}
+				catch { }
+			}
+		}
+	}
+
 	public void GetBeatMapDirectories(VirtualDirectory result)
 	{
 		List<PartialBeatmapSetInfo> files = this.RealmAccess.Run(x => x
@@ -156,12 +181,16 @@ public class OsuVFS : FileSystemBase
 	{
 		using ScopedSemaphoreSlim.Scope _ = this._rootDirectoryLock.Enter();
 
-		// TODO: make this faster, for now it takes 5 seconds for me to mount with 1000+ beatmaps and 21 skins, which is pretty bad, maybe we can do some lazy loading or something
-		// (maybe related to creating fileinfo)
 		VirtualDirectory beatMapDir = this.RootDirectory.AddDirectory(VirtualPath.FromDirectory(nameof(OsuVFSBaseDirectoryType.Songs)));
 		VirtualDirectory skinDir = this.RootDirectory.AddDirectory(VirtualPath.FromDirectory(nameof(OsuVFSBaseDirectoryType.Skins)));
-		this.GetBeatMapDirectories(beatMapDir);
-		this.GetSkinDirectories(skinDir);
+
+		// optimized a bit but still a bit slow (1.5s for 650+ beatmap sets and 20skins)
+		Task.WaitAll(
+			Task.Run(() => this.GetBeatMapDirectories(beatMapDir)),
+			Task.Run(() => this.GetSkinDirectories(skinDir)));
+
+		//PreFetchFileInfoForFilesInBackground(beatMapDir);
+		//PreFetchFileInfoForFilesInBackground(skinDir);
 
 		this._logger.LogInformation("OsuVFS mounted, host: {Host}", Host);
 		return STATUS_SUCCESS;
@@ -178,7 +207,6 @@ public class OsuVFS : FileSystemBase
 		VirtualDirectory? dir = this.RootDirectory.FindDirectory(VirtualPath.FromDirectory(FileName));
 		// maybe we need a proper way to determine if the path is a file or directory instead 
 
-		using ScopedSemaphoreSlim.Scope _ = this._descriptorLock.Enter();
 		if (file is not null)
 		{
 			this._logger.LogTrace("Open: File {name}", FileName);
@@ -186,8 +214,6 @@ public class OsuVFS : FileSystemBase
 			FileDescriptor descriptor = new(file, this.OpenStreamDefault(file.PhysicalFile));
 			FileDesc = descriptor;
 			FileInfo = this.CreateInfo(file.PhysicalFile);
-
-			this._openDescriptors.Add(descriptor);
 		}
 		else if (dir is not null)
 		{
@@ -196,8 +222,6 @@ public class OsuVFS : FileSystemBase
 			DirectoryDescriptor descriptor = new(dir);
 			FileDesc = descriptor;
 			FileInfo = this.CreateInfo(dir);
-
-			this._openDescriptors.Add(descriptor);
 		}
 		else
 		{
@@ -244,21 +268,45 @@ public class OsuVFS : FileSystemBase
 
 		this._logger.LogTrace("Closed: {FileDesc}", FileDesc);
 
-		if (FileDesc is FileDescriptor node)
-		{
-			// TODO: implement update file hash etc
-		}
-
+		if (descriptor.DeleteOnClose) Delete(descriptor.VirtualObject);
 		descriptor.Dispose();
-		using ScopedSemaphoreSlim.Scope _ = this._descriptorLock.Enter();
-		this._openDescriptors.Remove(descriptor);
+
+		void Delete(IVirtualFileSystemObject obj)
+		{
+			VirtualPath path = obj.GetFullPath();
+			if (obj is VirtualFile file)
+			{
+				this.RootDirectory.RemoveFile(path);
+				// file.PhysicalFile.Delete();
+				this._logger.LogInformation("Deleted file {path}, hash: {hash}", path, file.OriginalHash);
+			}
+			else if (obj is VirtualDirectory dir)
+			{
+				foreach (VirtualDirectory d in dir.Subdirectories)
+				{
+					Delete(d);
+				}
+				foreach (VirtualFile f in dir.Files)
+				{
+					Delete(f);
+				}
+				this.RootDirectory.RemoveDirectory(path);
+				this._logger.LogInformation("Deleted directory {path}", path);
+				// tbh i feel maybe we should optimize it by not iterating the tree for path
+			}
+			else
+			{
+				this._logger.LogWarning("Trying to delete an unknown type of object: {obj}", obj);
+			}
+		}
 	}
 	public override void Cleanup(object FileNode, object FileDesc, string FileName, uint Flags)
 	{
-		// TODO: figure out if something is needed here
-		// TODO: delete
 		this._logger.LogTrace("Cleanup: {FileDesc}", FileDesc);
-		base.Cleanup(FileNode, FileDesc, FileName, Flags);
+		if (Flags.HasFlag(CleanupDelete) && FileDesc is IDescriptor node)
+		{
+			node.DeleteOnClose = true;
+		}
 	}
 	#endregion
 
@@ -556,7 +604,7 @@ public class OsuVFS : FileSystemBase
 
 	public override int Create(string FileName, uint CreateOptions, uint GrantedAccess, uint FileAttributes, byte[] SecurityDescriptor, ulong AllocationSize, out object FileNode, out object FileDesc, out FSPFileInfo FileInfo, out string NormalizedName)
 	{
-		this._logger.LogDebug("Create: {name}, {attr}", FileName, (FileAttributes_t)FileAttributes);
+		this._logger.LogInformation("Create: {name}, {attr}", FileName, (FileAttributes_t)FileAttributes);
 
 		if (!this.IsValidWriteOperation(FileName))
 		{
@@ -612,7 +660,7 @@ public class OsuVFS : FileSystemBase
 	}
 	public override int Rename(object FileNode, object FileDesc, string FileName, string NewFileName, bool ReplaceIfExists)
 	{
-		this._logger.LogDebug("Rename: [overwrite: {ow}] {old} to {new}", ReplaceIfExists, FileName, NewFileName);
+		this._logger.LogInformation("Rename: [overwrite: {ow}] {old} to {new}", ReplaceIfExists, FileName, NewFileName);
 
 		if (!this.IsValidWriteOperation(NewFileName) || !this.IsValidWriteOperation(FileName))
 		{
@@ -642,7 +690,7 @@ public class OsuVFS : FileSystemBase
 			VirtualDirectory oldDir = dirNode.Directory;
 			this.RootDirectory.RemoveDirectory(oldDirPath);
 			this.RootDirectory.AddDirectory(oldDir, newDirPath.Mutate(x => x[..^1]));
-			oldDir.Name = newDirPath.DirectorySegments.Last();
+			oldDir.Name = newDirPath.DirectorySegments[^1];
 
 			return STATUS_SUCCESS;
 		}
@@ -690,17 +738,17 @@ public class OsuVFS : FileSystemBase
 			return STATUS_NOT_SUPPORTED;
 		}
 
-		// TODO: actually implement this
+		// open handle checking is done by fsp
 		if (FileDesc is DirectoryDescriptor dirNode)
 		{
-			if (dirNode.Directory.Subdirectories.Count > 0 || dirNode.Directory.Files.Count > 0)
+			if (!dirNode.Directory.IsEmpty)
 			{
 				return STATUS_DIRECTORY_NOT_EMPTY;
 			}
+			return STATUS_SUCCESS;
 		}
-		else if (FileDesc is FileDescriptor)
+		else if (FileDesc is FileDescriptor fileNode)
 		{
-			// no checks for now
 			return STATUS_SUCCESS;
 		}
 
