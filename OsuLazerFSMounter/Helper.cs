@@ -27,4 +27,30 @@ public static class Helper
 		path = path.TrimEnd();
 		return path.EndsWith("/") || path.EndsWith("\\");
 	}
+
+	/// <summary>
+	/// if b is a prefix of a, returns true, otherwise false
+	/// </summary>
+	/// <param name="a"></param>
+	/// <param name="b"></param>
+	/// <returns></returns>
+	public static bool HasPrefixOf(this string[] a, string[] b)
+	{
+		if (a.Length < b.Length)
+			return false;
+
+		for (int i = 0; i < b.Length; i++)
+		{
+			if (a[i] != b[i])
+				return false;
+		}
+		return true;
+	}
+	public static string[] ReplacePrefix(this string[] a, string[] prefixToReplace, string[] replacement)
+	{
+		if (!a.HasPrefixOf(prefixToReplace))
+			throw new ArgumentException("The array does not have the specified prefix.", nameof(prefixToReplace));
+
+		return replacement.Concat(a.Skip(prefixToReplace.Length)).ToArray();
+	}
 }

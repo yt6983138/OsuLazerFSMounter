@@ -1,13 +1,13 @@
 ﻿using Fsp;
 using Fsp.Interop;
 using Microsoft.Extensions.Logging;
-using Microsoft.VisualBasic;
 using osu.Game.Beatmaps;
 using osu.Game.Database;
 using osu.Game.Models;
 using osu.Game.Skinning;
 using OsuLazerFSMounter.FileSystem;
 using System.Security.AccessControl;
+using FileAttributes_t = System.IO.FileAttributes; // bruh fsp uses pascal case parameter for some reason
 using FileInfo = System.IO.FileInfo;
 using FSPFileInfo = Fsp.Interop.FileInfo;
 
@@ -29,6 +29,9 @@ public class OsuVFS : FileSystemBase
 	private record class PartialSkinInfo(Guid ID, string Name, RealmFileInfo[] Files);
 
 	private readonly ILogger<OsuVFS> _logger;
+	private readonly List<IDescriptor> _openDescriptors = [];
+	private readonly ScopedSemaphoreSlim _descriptorLock = new(1, 1);
+	private readonly ScopedSemaphoreSlim _rootDirectoryLock = new(1, 1);
 
 	public VirtualDirectory RootDirectory { get; set; } = new("");
 
@@ -52,7 +55,19 @@ public class OsuVFS : FileSystemBase
 		return name;
 	}
 
-	public List<VirtualDirectory> GetBeatMapDirectories()
+	private FileInfo FindPhysical(string hash)
+	{
+		string first = hash[0].ToString();
+		string firstTwo = hash[..2];
+
+		FileInfo info = this.FilesFolder
+			.GetDirectories().First(x => x.Name == first)
+			.GetDirectories().First(x => x.Name == firstTwo)
+			.GetFiles().First(x => x.Name == hash);
+
+		return info;
+	}
+	public void GetBeatMapDirectories(VirtualDirectory result)
 	{
 		List<PartialBeatmapSetInfo> files = this.RealmAccess.Run(x => x
 			.All<BeatmapSetInfo>()
@@ -60,26 +75,23 @@ public class OsuVFS : FileSystemBase
 			.Select(x => new PartialBeatmapSetInfo(x.Metadata.Title, x.ID, x.OnlineID, x.Files.Select(y => new RealmFileInfo(y)).ToArray()))
 			.ToList());
 
-		List<VirtualDirectory> result = [];
 		foreach (PartialBeatmapSetInfo item in files)
 		{
 			string name; // the ID hash code is just for anti duplication
 			if (item.OnlineID <= 0) name = $"{SanitizeFileName(item.Title)} {item.ID.GetHashCode()}";
 			else name = $"{item.OnlineID} {SanitizeFileName(item.Title)}";
 
-			VirtualDirectory directory = new(name);
+			VirtualDirectory directory = result.AddDirectory(VirtualPath.FromDirectory(name));
 
 			foreach (RealmFileInfo file in item.Files)
 			{
-				directory.AddFile(file.Path, file.Hash);
+				VirtualPath path = VirtualPath.FromFile(file.Path);
+				directory.AddFile(new(path.FileName, file.Hash, this.FindPhysical(file.Hash)), path);
 			}
 
-			result.Add(directory);
 		}
-
-		return result;
 	}
-	public List<VirtualDirectory> GetSkinDirectories()
+	public void GetSkinDirectories(VirtualDirectory result)
 	{
 		List<PartialSkinInfo> files = this.RealmAccess.Run(x => x
 			.All<SkinInfo>()
@@ -87,26 +99,23 @@ public class OsuVFS : FileSystemBase
 			.Select(x => new PartialSkinInfo(x.ID, x.Name, x.Files.Select(y => new RealmFileInfo(y)).ToArray()))
 			.ToList());
 
-		List<VirtualDirectory> result = [];
 		foreach (PartialSkinInfo item in files)
 		{
 			string name = $"{SanitizeFileName(item.Name)} {item.ID.GetHashCode()}";
 
-			VirtualDirectory directory = new(name);
+			VirtualDirectory directory = result.AddDirectory(VirtualPath.FromDirectory(name));
 
 			foreach (RealmFileInfo file in item.Files)
 			{
-				directory.AddFile(file.Path, file.Hash);
+				VirtualPath path = VirtualPath.FromFile(file.Path);
+				directory.AddFile(new(path.FileName, file.Hash, this.FindPhysical(file.Hash)), path);
 			}
-
-			result.Add(directory);
 		}
-
-		return result;
 	}
 
 	private FSPFileInfo CreateInfo(FileInfo info)
 	{
+		info.Refresh(); // make sure the info is up to date
 		return new()
 		{
 			FileSize = (ulong)info.Length,
@@ -145,72 +154,79 @@ public class OsuVFS : FileSystemBase
 	}
 	public override int Mounted(object Host)
 	{
-		this.RootDirectory.Subdirectories.Add(new(nameof(OsuVFSBaseDirectoryType.Songs)) { Subdirectories = this.GetBeatMapDirectories() });
-		this.RootDirectory.Subdirectories.Add(new(nameof(OsuVFSBaseDirectoryType.Skins)) { Subdirectories = this.GetSkinDirectories() });
+		using ScopedSemaphoreSlim.Scope _ = this._rootDirectoryLock.Enter();
+
+		// TODO: make this faster, for now it takes 5 seconds for me to mount with 1000+ beatmaps and 21 skins, which is pretty bad, maybe we can do some lazy loading or something
+		// (maybe related to creating fileinfo)
+		VirtualDirectory beatMapDir = this.RootDirectory.AddDirectory(VirtualPath.FromDirectory(nameof(OsuVFSBaseDirectoryType.Songs)));
+		VirtualDirectory skinDir = this.RootDirectory.AddDirectory(VirtualPath.FromDirectory(nameof(OsuVFSBaseDirectoryType.Skins)));
+		this.GetBeatMapDirectories(beatMapDir);
+		this.GetSkinDirectories(skinDir);
+
 		this._logger.LogInformation("OsuVFS mounted, host: {Host}", Host);
 		return STATUS_SUCCESS;
 	}
 	public override void Unmounted(object Host)
 	{
-		this.RootDirectory.Subdirectories.Clear();
-		this.RootDirectory.Files.Clear();
+		using ScopedSemaphoreSlim.Scope _ = this._rootDirectoryLock.Enter();
+		this.RootDirectory.RemoveAll();
 		this._logger.LogInformation("OsuVFS unmounted, host: {Host}", Host);
 	}
-
-	private FileInfo FindPhysical(VirtualFile file)
+	public override int Open(string FileName, uint CreateOptions, uint GrantedAccess, out object FileNode, out object FileDesc, out FSPFileInfo FileInfo, out string NormalizedName)
 	{
-		string first = file.Hash[0].ToString();
-		string firstTwo = file.Hash[..2];
+		VirtualFile? file = this.RootDirectory.FindFile(VirtualPath.FromFile(FileName));
+		VirtualDirectory? dir = this.RootDirectory.FindDirectory(VirtualPath.FromDirectory(FileName));
+		// maybe we need a proper way to determine if the path is a file or directory instead 
 
-		FileInfo info = this.FilesFolder
-			.GetDirectories().First(x => x.Name == first)
-			.GetDirectories().First(x => x.Name == firstTwo)
-			.GetFiles().First(x => x.Name == file.Hash);
-
-		return info;
-	}
-	public override int Open(string fileName, uint createOptions, uint grantedAccess, out object fileNode, out object fileDesc, out FSPFileInfo fileInfo, out string NormalizedName)
-	{
-		string[] brokenPath = VirtualDirectory.BreakIntoDirectoryPathsAndSanitize(fileName);
-		VirtualFile? file = this.RootDirectory.FindFile(fileName);
-		VirtualDirectory? dir = this.RootDirectory.FindDirectory(fileName);
-
+		using ScopedSemaphoreSlim.Scope _ = this._descriptorLock.Enter();
 		if (file is not null)
 		{
-			FileInfo physicalFile = this.FindPhysical(file);
+			this._logger.LogTrace("Open: File {name}", FileName);
 
-			fileDesc = new FileNode(brokenPath, file, this.OpenStreamDefault(physicalFile), physicalFile);
-			fileInfo = this.CreateInfo(physicalFile);
+			FileDescriptor descriptor = new(file, this.OpenStreamDefault(file.PhysicalFile));
+			FileDesc = descriptor;
+			FileInfo = this.CreateInfo(file.PhysicalFile);
+
+			this._openDescriptors.Add(descriptor);
 		}
 		else if (dir is not null)
 		{
-			fileDesc = new DirectoryNode(VirtualDirectory.EnsureLastIsDirectory(brokenPath), dir);
-			fileInfo = this.CreateInfo(dir);
+			this._logger.LogTrace("Open: Directory {name}", FileName);
+
+			DirectoryDescriptor descriptor = new(dir);
+			FileDesc = descriptor;
+			FileInfo = this.CreateInfo(dir);
+
+			this._openDescriptors.Add(descriptor);
 		}
 		else
 		{
-			fileNode = null!;
-			fileDesc = null!;
-			fileInfo = default;
+			this._logger.LogWarning("Open: Not found {name}", FileName);
+
+			FileNode = null!;
+			FileDesc = null!;
+			FileInfo = default;
 			NormalizedName = null!;
 			return STATUS_OBJECT_NAME_NOT_FOUND;
 		}
 
 		NormalizedName = null!;
-		fileNode = null!;
+		FileNode = null!;
 
 		return STATUS_SUCCESS;
 	}
 	public override int Flush(object FileNode, object FileDesc, out FSPFileInfo FileInfo)
 	{
-		if (FileDesc is not FileNode node)
+		this._logger.LogDebug("Flushed: {FileDesc}", FileDesc);
+
+		if (FileDesc is not FileDescriptor node)
 		{
 			FileInfo = default;
 			return STATUS_INVALID_PARAMETER;
 		}
 
 		node.Stream.Flush();
-		FileInfo = this.CreateInfo(node.Info) with
+		FileInfo = this.CreateInfo(node.File.PhysicalFile) with
 		{
 			FileSize = (ulong)node.Stream.Length,
 			AllocationSize = (ulong)node.Stream.Length,
@@ -220,19 +236,28 @@ public class OsuVFS : FileSystemBase
 	}
 	public override void Close(object FileNode, object FileDesc)
 	{
-		if (FileDesc is not FileNode node)
+		if (FileDesc is not IDescriptor descriptor)
 		{
 			this._logger.LogWarning("Close called with invalid FileDesc: {FileDesc}", FileDesc);
 			return;
 		}
 
-		node.Stream.Dispose();
-		// TODO: implement update file hash etc
+		this._logger.LogTrace("Closed: {FileDesc}", FileDesc);
+
+		if (FileDesc is FileDescriptor node)
+		{
+			// TODO: implement update file hash etc
+		}
+
+		descriptor.Dispose();
+		using ScopedSemaphoreSlim.Scope _ = this._descriptorLock.Enter();
+		this._openDescriptors.Remove(descriptor);
 	}
 	public override void Cleanup(object FileNode, object FileDesc, string FileName, uint Flags)
 	{
 		// TODO: figure out if something is needed here
 		// TODO: delete
+		this._logger.LogTrace("Cleanup: {FileDesc}", FileDesc);
 		base.Cleanup(FileNode, FileDesc, FileName, Flags);
 	}
 	#endregion
@@ -240,11 +265,15 @@ public class OsuVFS : FileSystemBase
 	#region Read
 	public override unsafe int Read(object FileNode, object FileDesc, nint Buffer, ulong Offset, uint Length, out uint BytesTransferred)
 	{
-		if (FileDesc is not FileNode node)
+		this._logger.LogTrace("Read: {FileDesc}", FileDesc);
+
+		if (FileDesc is not FileDescriptor node)
 		{
 			BytesTransferred = 0;
 			return STATUS_INVALID_PARAMETER;
 		}
+
+		using ScopedSemaphoreSlim.Scope _ = node.Lock.Enter();
 		node.Stream.Seek((long)Offset, SeekOrigin.Begin);
 
 		Span<byte> span = new(Buffer.ToPointer(), (int)Length);
@@ -255,13 +284,22 @@ public class OsuVFS : FileSystemBase
 
 	public override int ReadDirectory(object FileNode, object FileDesc, string Pattern, string Marker, nint Buffer, uint Length, out uint BytesTransferred)
 	{
-		// left as-is
+		// left as-is, it has default implementation that uses ReadDirectoryEntry
+		this._logger.LogTrace("ReadDirectory: {FileDesc}, Pattern: {Pattern}, Marker: {Marker}", FileDesc, Pattern, Marker);
+
+		if (FileDesc is not IDescriptor descriptor)
+		{
+			BytesTransferred = 0;
+			return STATUS_INVALID_PARAMETER;
+		}
+
+		using ScopedSemaphoreSlim.Scope _ = descriptor.Lock.Enter();
 		return base.ReadDirectory(FileNode, FileDesc, Pattern, Marker, Buffer, Length, out BytesTransferred);
 	}
 	// return: current is valid, next may not be valid
 	public override bool ReadDirectoryEntry(object FileNode, object FileDesc, string Pattern, string Marker, ref object Context, out string FileName, out FSPFileInfo FileInfo)
 	{
-		if (FileDesc is not DirectoryNode node)
+		if (FileDesc is not DirectoryDescriptor node)
 		{
 			FileInfo = default;
 			FileName = null!;
@@ -278,7 +316,7 @@ public class OsuVFS : FileSystemBase
 		}
 
 		bool hasReachedMarker = Marker is null;
-	Loop:
+	LoopToMarker:
 		context.LastPosition++;
 
 		if (context.LastPosition >= context.Directory.Files.Count + context.Directory.Subdirectories.Count)
@@ -297,13 +335,11 @@ public class OsuVFS : FileSystemBase
 			if (!hasReachedMarker)
 			{
 				hasReachedMarker = file.Name == Marker;
-				goto Loop;
+				goto LoopToMarker;
 			}
 
-			FileInfo info = this.FindPhysical(file);
-
 			FileName = file.Name;
-			FileInfo = this.CreateInfo(info);
+			FileInfo = this.CreateInfo(file.PhysicalFile);
 			return true;
 		}
 		else
@@ -312,7 +348,7 @@ public class OsuVFS : FileSystemBase
 			if (!hasReachedMarker)
 			{
 				hasReachedMarker = subdir.Name == Marker;
-				goto Loop;
+				goto LoopToMarker;
 			}
 
 			FileName = subdir.Name;
@@ -328,12 +364,12 @@ public class OsuVFS : FileSystemBase
 	}
 	public override int GetFileInfo(object FileNode, object FileDesc, out FSPFileInfo FileInfo)
 	{
-		if (FileDesc is FileNode node)
+		if (FileDesc is FileDescriptor node)
 		{
-			FileInfo = this.CreateInfo(node.Info);
+			FileInfo = this.CreateInfo(node.File.PhysicalFile);
 			return STATUS_SUCCESS;
 		}
-		else if (FileDesc is DirectoryNode dirNode)
+		else if (FileDesc is DirectoryDescriptor dirNode)
 		{
 			FileInfo = this.CreateInfo(dirNode.Directory);
 			return STATUS_SUCCESS;
@@ -361,8 +397,9 @@ public class OsuVFS : FileSystemBase
 	}
 	public override int GetSecurityByName(string FileName, out uint FileAttributes, ref byte[] SecurityDescriptor)
 	{
-		VirtualFile? file = this.RootDirectory.FindFile(FileName);
-		VirtualDirectory? dir = this.RootDirectory.FindDirectory(FileName);
+		this._logger.LogTrace("GetSecurityByName: {name}", FileName);
+		VirtualDirectory? dir = this.RootDirectory.FindDirectory(VirtualPath.FromDirectory(FileName));
+		VirtualFile? file = this.RootDirectory.FindFile(VirtualPath.FromFile(FileName));
 		if (file is not null)
 		{
 			FileAttributes = new FileAttributeBuilder().UIntValue;
@@ -405,17 +442,21 @@ public class OsuVFS : FileSystemBase
 	#region Write
 	public override unsafe int Write(object FileNode, object FileDesc, nint Buffer, ulong Offset, uint Length, bool WriteToEndOfFile, bool ConstrainedIo, out uint BytesTransferred, out FSPFileInfo FileInfo)
 	{
-		if (FileDesc is not FileNode node)
+		this._logger.LogDebug("Write: {FileDesc}", FileDesc);
+
+		if (FileDesc is not FileDescriptor node)
 		{
 			BytesTransferred = 0;
 			FileInfo = default;
 			return STATUS_INVALID_PARAMETER;
 		}
+
+		using ScopedSemaphoreSlim.Scope _ = node.Lock.Enter();
 		Span<byte> span = new(Buffer.ToPointer(), (int)Length);
 		node.Stream.Seek((long)Offset, SeekOrigin.Begin);
 		node.Stream.Write(span);
 		BytesTransferred = Length;
-		FileInfo = this.CreateInfo(node.Info) with
+		FileInfo = this.CreateInfo(node.File.PhysicalFile) with
 		{
 			AllocationSize = (ulong)node.Stream.Length,
 			FileSize = (ulong)node.Stream.Length
@@ -424,15 +465,18 @@ public class OsuVFS : FileSystemBase
 	}
 	public override int Overwrite(object FileNode, object FileDesc, uint FileAttributes, bool ReplaceFileAttributes, ulong AllocationSize, out FSPFileInfo FileInfo)
 	{
-		if (FileDesc is not FileNode node)
+		this._logger.LogDebug("Overwrite: {FileDesc}", FileDesc);
+
+		if (FileDesc is not FileDescriptor node)
 		{
 			FileInfo = default;
 			return STATUS_INVALID_PARAMETER;
 		}
 
+		using ScopedSemaphoreSlim.Scope _ = node.Lock.Enter();
 		node.Stream.Dispose();
-		node.Stream = this.OpenStreamDefault(node.Info, FileMode.Create);
-		FileInfo = this.CreateInfo(node.Info) with
+		node.Stream = this.OpenStreamDefault(node.File.PhysicalFile, FileMode.Create);
+		FileInfo = this.CreateInfo(node.File.PhysicalFile) with
 		{
 			FileSize = 0,
 			AllocationSize = AllocationSize, // not sure if this will work
@@ -447,17 +491,30 @@ public class OsuVFS : FileSystemBase
 	}
 	public override int SetFileSize(object FileNode, object FileDesc, ulong NewSize, bool SetAllocationSize, out FSPFileInfo FileInfo)
 	{
-		if (FileDesc is not FileNode node)
+		this._logger.LogDebug("SetFileSize: {FileDesc}, {size}", FileDesc, NewSize);
+
+		if (FileDesc is not FileDescriptor node)
 		{
 			FileInfo = default;
 			return STATUS_INVALID_PARAMETER;
 		}
 
-		node.Stream.SetLength((long)NewSize);
-		FileInfo = this.CreateInfo(node.Info) with
+		if (SetAllocationSize)
 		{
-			FileSize = NewSize,
-			AllocationSize = SetAllocationSize ? NewSize : (ulong)node.Stream.Length
+			// basically do nothing
+			FileInfo = this.CreateInfo(node.File.PhysicalFile) with
+			{
+				FileSize = (ulong)node.Stream.Length,
+				AllocationSize = NewSize
+			};
+			return STATUS_SUCCESS;
+		}
+
+		using ScopedSemaphoreSlim.Scope _ = node.Lock.Enter();
+		node.Stream.SetLength((long)NewSize);
+		FileInfo = this.CreateInfo(node.File.PhysicalFile) with
+		{
+			FileSize = NewSize
 		};
 		return STATUS_SUCCESS;
 	}
@@ -484,10 +541,10 @@ public class OsuVFS : FileSystemBase
 	}
 	#endregion
 
-	#region Create, Delete, Rename
+	#region Create, Delete, Rename (Only one operation at same time)
 	private bool IsValidWriteOperation(string fileName)
 	{
-		string[] paths = VirtualDirectory.BreakIntoDirectoryPathsAndSanitize(fileName);
+		string[] paths = VirtualPath.BreakIntoDirectoryPathsAndSanitize(fileName);
 		if (paths.Length < 3)
 		{
 			// only allows creating both folders and files in song-specific or skin-specific folder
@@ -499,6 +556,8 @@ public class OsuVFS : FileSystemBase
 
 	public override int Create(string FileName, uint CreateOptions, uint GrantedAccess, uint FileAttributes, byte[] SecurityDescriptor, ulong AllocationSize, out object FileNode, out object FileDesc, out FSPFileInfo FileInfo, out string NormalizedName)
 	{
+		this._logger.LogDebug("Create: {name}, {attr}", FileName, (FileAttributes_t)FileAttributes);
+
 		if (!this.IsValidWriteOperation(FileName))
 		{
 			FileNode = null!;
@@ -509,99 +568,117 @@ public class OsuVFS : FileSystemBase
 		}
 
 		// note ignoring file attributes, granted access, create options, security descriptor etc for now, will implement later if needed
-		if (FileAttributes.HasFlag((uint)FileAttribute.Directory))
+		if (FileAttributes.HasFlag((uint)FileAttributes_t.Directory))
 		{
-			if (this.RootDirectory.FindDirectory(FileName) is not null)
-				goto Collision;
+			if (this.RootDirectory.FindDirectory(VirtualPath.FromDirectory(FileName)) is not null)
+			{
+				FileNode = null!;
+				FileDesc = null!;
+				FileInfo = default;
+				NormalizedName = null!;
+				return STATUS_OBJECT_NAME_COLLISION;
+			}
 
-			VirtualDirectory dir = this.RootDirectory.AddDirectory(FileName);
+			VirtualDirectory dir = this.RootDirectory.AddDirectory(VirtualPath.FromDirectory(FileName));
 
 			FileNode = null!;
-			FileDesc = new DirectoryNode(VirtualDirectory.BreakIntoDirectoryPathsAndSanitize(FileName), dir);
+			FileDesc = new DirectoryDescriptor(dir);
 			FileInfo = this.CreateInfo(dir);
 			NormalizedName = null!;
 			return STATUS_SUCCESS;
 		}
 		else
 		{
-			if (this.RootDirectory.FindFile(FileName) is not null)
-				goto Collision;
+			if (this.RootDirectory.FindFile(VirtualPath.FromFile(FileName)) is not null)
+			{
+				FileNode = null!;
+				FileDesc = null!;
+				FileInfo = default;
+				NormalizedName = null!;
+				return STATUS_OBJECT_NAME_COLLISION;
+			}
 
-			VirtualFile file = this.RootDirectory.AddFile(FileName, ""); // add with empty hash, will be updated later when the file is closed
+			VirtualPath filePath = VirtualPath.FromFile(FileName);
 			FileInfo physicalFile = new(Path.GetTempFileName());
+			VirtualFile file = new(filePath.FileName, "", physicalFile);
+			this.RootDirectory.AddFile(file, filePath);
 
 			FileNode = null!;
-			FileDesc = new FileNode(VirtualDirectory.BreakIntoDirectoryPathsAndSanitize(FileName), file, this.OpenStreamDefault(physicalFile), physicalFile);
+			FileDesc = new FileDescriptor(file, this.OpenStreamDefault(physicalFile));
 			FileInfo = this.CreateInfo(physicalFile);
 			NormalizedName = null!;
 			return STATUS_SUCCESS;
 		}
-
-	Collision:
-		FileNode = null!;
-		FileDesc = null!;
-		FileInfo = default;
-		NormalizedName = null!;
-		return STATUS_OBJECT_NAME_COLLISION;
 	}
 	public override int Rename(object FileNode, object FileDesc, string FileName, string NewFileName, bool ReplaceIfExists)
 	{
+		this._logger.LogDebug("Rename: [overwrite: {ow}] {old} to {new}", ReplaceIfExists, FileName, NewFileName);
+
 		if (!this.IsValidWriteOperation(NewFileName) || !this.IsValidWriteOperation(FileName))
 		{
 			return STATUS_NOT_SUPPORTED;
 		}
 
-		if (FileDesc is DirectoryNode dirNode)
+		if (FileDesc is DirectoryDescriptor dirNode)
 		{
-			VirtualDirectory? targetDir = this.RootDirectory.FindDirectory(FileName);
+			using ScopedSemaphoreSlim.Scope _ = dirNode.Lock.Enter();
+
+			VirtualPath oldDirPath = VirtualPath.FromDirectory(FileName);
+			VirtualPath newDirPath = VirtualPath.FromDirectory(NewFileName);
+
+			VirtualDirectory? targetDir = this.RootDirectory.FindDirectory(newDirPath);
 			if (targetDir is not null)
 			{
 				return STATUS_OBJECT_NAME_COLLISION;
 			}
 
-			VirtualDirectory? oldParent = this.RootDirectory.GetPathParent(FileName);
+			VirtualDirectory? oldParent = this.RootDirectory.FindDirectory(oldDirPath)?.Parent;
 			if (oldParent is null)
 			{
 				this._logger.LogWarning("Failed to find parent directory for {FileName} during rename operation", FileName);
 				return STATUS_UNEXPECTED_IO_ERROR;
 			}
-			oldParent.Subdirectories.Remove(dirNode.Directory);
-			VirtualDirectory oldNode = dirNode.Directory;
 
-			dirNode.SplitPath = VirtualDirectory.BreakIntoDirectoryPathsAndSanitize(NewFileName);
-			dirNode.Directory = this.RootDirectory.AddDirectory(NewFileName);
-			dirNode.Directory.Subdirectories = oldNode.Subdirectories;
-			dirNode.Directory.Files = oldNode.Files;
+			VirtualDirectory oldDir = dirNode.Directory;
+			this.RootDirectory.RemoveDirectory(oldDirPath);
+			this.RootDirectory.AddDirectory(oldDir, newDirPath.Mutate(x => x[..^1]));
+			oldDir.Name = newDirPath.DirectorySegments.Last();
 
 			return STATUS_SUCCESS;
 		}
-		else if (FileDesc is FileNode node)
+		else if (FileDesc is FileDescriptor node)
 		{
-			VirtualFile? targetFile = this.RootDirectory.FindFile(NewFileName);
-			VirtualDirectory? newParent = this.RootDirectory.GetPathParent(NewFileName);
+			using ScopedSemaphoreSlim.Scope _ = node.Lock.Enter();
+
+			VirtualPath oldPath = VirtualPath.FromFile(FileName);
+			VirtualPath newPath = VirtualPath.FromFile(NewFileName);
+
+			VirtualFile? targetFile = this.RootDirectory.FindFile(newPath);
+
+			VirtualDirectory? newParent = targetFile?.Parent;
+			VirtualDirectory? oldParent = node.File.Parent;
+
+			if (oldParent is null)
+			{
+				this._logger.LogWarning("Failed to find parent directory for {FileName} during rename operation", FileName);
+				return STATUS_UNEXPECTED_IO_ERROR;
+			}
+
 			if (targetFile is not null)
 			{
 				if (!ReplaceIfExists)
-					return STATUS_OBJECT_NAME_COLLISION;
-
-				VirtualDirectory? oldParent = this.RootDirectory.GetPathParent(FileName);
-				if (oldParent is null)
 				{
-					this._logger.LogWarning("Failed to find parent directory for {FileName} during rename operation", FileName);
-					return STATUS_UNEXPECTED_IO_ERROR;
+					return STATUS_OBJECT_NAME_COLLISION;
 				}
-
-				targetFile.Hash = node.File.Hash;
-				// setting the file simply because it will be updated in close or cleanup anyway
-				node.File = targetFile;
-				node.SplitPath = VirtualDirectory.BreakIntoDirectoryPathsAndSanitize(NewFileName);
-
-				return STATUS_SUCCESS;
+				this.RootDirectory.RemoveFile(newPath);
 			}
 
-			VirtualFile newNode = this.RootDirectory.AddFile(NewFileName, node.File.Hash);
-			node.File = newNode;
-			node.SplitPath = VirtualDirectory.BreakIntoDirectoryPathsAndSanitize(NewFileName);
+			this.RootDirectory.RemoveFile(oldPath);
+
+			node.File = new(newPath.FileName, node.File.OriginalHash, node.File.PhysicalFile);
+			this.RootDirectory.AddFile(node.File, newPath);
+
+			return STATUS_SUCCESS;
 		}
 
 		return STATUS_INVALID_PARAMETER;
@@ -613,16 +690,18 @@ public class OsuVFS : FileSystemBase
 			return STATUS_NOT_SUPPORTED;
 		}
 
-		if (FileDesc is DirectoryNode dirNode)
+		// TODO: actually implement this
+		if (FileDesc is DirectoryDescriptor dirNode)
 		{
 			if (dirNode.Directory.Subdirectories.Count > 0 || dirNode.Directory.Files.Count > 0)
 			{
 				return STATUS_DIRECTORY_NOT_EMPTY;
 			}
 		}
-		else if (FileDesc is FileNode)
+		else if (FileDesc is FileDescriptor)
 		{
-			return STATUS_SUCCESS; // no checks for now
+			// no checks for now
+			return STATUS_SUCCESS;
 		}
 
 		return STATUS_INVALID_PARAMETER;
