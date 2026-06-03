@@ -6,6 +6,7 @@ using osu.Game.Database;
 using osu.Game.Models;
 using osu.Game.Skinning;
 using OsuLazerFSMounter.FileSystem;
+using System.Collections.Concurrent;
 using System.Collections.Frozen;
 using System.Security.AccessControl;
 using FileAttributes_t = System.IO.FileAttributes; // bruh fsp uses pascal case parameter for some reason
@@ -28,10 +29,20 @@ public class OsuVFS : FileSystemBase
 	}
 	private record class PartialBeatmapSetInfo(string Title, Guid ID, int OnlineID, RealmFileInfo[] Files);
 	private record class PartialSkinInfo(Guid ID, string Name, RealmFileInfo[] Files);
+	private record class ReverseHashInfo(List<VirtualFile> Files)
+	{
+		public ScopedSemaphoreSlim Lock { get; } = new(1, 1);
+	}
 
 	private readonly ILogger<OsuVFS> _logger;
 	private readonly ScopedSemaphoreSlim _rootDirectoryLock = new(1, 1);
 	private readonly FrozenDictionary<string, DirectoryInfo> _cachedHashDirectories;
+	/// <summary>
+	/// this is only for storing files that have the same hash, so they will point to the same physical file, 
+	/// this dictionary may be modified and kinda works as a temporary database, so it will not hold all files
+	/// </summary>
+	private readonly ConcurrentDictionary<string, ReverseHashInfo> _reverseHashFileDictionary = new();
+	private readonly DirectoryInfo _tempFolder = Directory.CreateTempSubdirectory("osu_vfs_");
 
 	public VirtualDirectory RootDirectory { get; set; } = new("");
 
@@ -65,33 +76,47 @@ public class OsuVFS : FileSystemBase
 
 		return this._cachedHashDirectories[firstTwo].EnumerateFiles(hash).First(x => x.Name == hash);
 	}
-	// this was used to test if lazy works better, currently reserved
-	private static Task PreFetchFileInfoForFilesInBackground(VirtualDirectory dir)
+	private void AddFileToDirectoryAndReverseHash(VirtualDirectory dir, RealmFileInfo file)
 	{
-		return Task.Run(() => PreFetchDirectoryCore(dir));
+		VirtualPath path = VirtualPath.FromFile(file.Path);
 
-		static void PreFetchDirectoryCore(VirtualDirectory dir)
-		{
-			for (int i = 0; i < dir.Subdirectories.Count; i++)
-			{
-				try
-				{
-					PreFetchDirectoryCore(dir.Subdirectories[i]);
-				}
-				catch { }
-			}
+		// quite hacky, maybe i should redesign this?
+		VirtualFile virtualFile = new(path.FileName, file.Hash, (Lazy<FileInfo>)null!);
+		virtualFile.PhysicalFileLazy = new(() => this.LazyFetchFileInfo(virtualFile));
 
-			for (int i = 0; i < dir.Files.Count; i++)
+		dir.AddFile(virtualFile, path);
+		this._reverseHashFileDictionary.AddOrUpdate(
+			file.Hash,
+			_ => new([virtualFile]),
+			(_, info) =>
 			{
-				try
-				{
-					_ = dir.Files[i].PhysicalFile;
-				}
-				catch { }
-			}
-		}
+				using ScopedSemaphoreSlim.Scope _2 = info.Lock.Enter();
+				info.Files.Add(virtualFile);
+				return info;
+			});
 	}
 
+	public FileInfo LazyFetchFileInfo(VirtualFile self)
+	{
+		FileInfo physical = this.FindPhysical(self.OriginalHash);
+
+		if (this._reverseHashFileDictionary.TryGetValue(self.OriginalHash, out ReverseHashInfo? info))
+		{
+			using ScopedSemaphoreSlim.Scope _ = info.Lock.Enter();
+			if (info.Files.Count <= 1 || !info.Files.Remove(self))
+			{
+				// no more files with same hash pointing to the same physical file
+				return physical;
+			}
+
+			this._logger.LogDebug("Separating file hash {hash} to a new physical file, {count} same hash remains", self.OriginalHash, info.Files.Count - 1);
+			FileInfo newFile = physical.CopyTo(Path.Combine(this._tempFolder.FullName, Path.GetRandomFileName()));
+
+			return newFile;
+		}
+
+		return physical;
+	}
 	public void GetBeatMapDirectories(VirtualDirectory result)
 	{
 		List<PartialBeatmapSetInfo> files = this.RealmAccess.Run(x => x
@@ -107,13 +132,12 @@ public class OsuVFS : FileSystemBase
 			else name = $"{item.OnlineID} {SanitizeFileName(item.Title)}";
 
 			VirtualDirectory directory = result.AddDirectory(VirtualPath.FromDirectory(name));
+			directory.Identifier = item.ID;
 
 			foreach (RealmFileInfo file in item.Files)
 			{
-				VirtualPath path = VirtualPath.FromFile(file.Path);
-				directory.AddFile(new(path.FileName, file.Hash, this.FindPhysical(file.Hash)), path);
+				this.AddFileToDirectoryAndReverseHash(directory, file);
 			}
-
 		}
 	}
 	public void GetSkinDirectories(VirtualDirectory result)
@@ -129,11 +153,11 @@ public class OsuVFS : FileSystemBase
 			string name = $"{SanitizeFileName(item.Name)} {item.ID.GetHashCode()}";
 
 			VirtualDirectory directory = result.AddDirectory(VirtualPath.FromDirectory(name));
+			directory.Identifier = item.ID;
 
 			foreach (RealmFileInfo file in item.Files)
 			{
-				VirtualPath path = VirtualPath.FromFile(file.Path);
-				directory.AddFile(new(path.FileName, file.Hash, this.FindPhysical(file.Hash)), path);
+				this.AddFileToDirectoryAndReverseHash(directory, file);
 			}
 		}
 	}

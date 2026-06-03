@@ -6,15 +6,22 @@ public class VirtualFile : IVirtualFileSystemObject
 
 	public string Name { get; set; }
 	public string OriginalHash { get; set; }
-	public FileInfo PhysicalFile { get; set; }
+	public FileInfo PhysicalFile
+	{
+		get => this.PhysicalFileLazy.Value;
+		set => this.PhysicalFileLazy = new(value);
+	}
+	public Lazy<FileInfo> PhysicalFileLazy { get; set; }
 
 	public bool IsNewlyCreated => string.IsNullOrEmpty(this.OriginalHash);
 
 	public VirtualFile(string name, string hash, FileInfo physicalFile)
+		: this(name, hash, new Lazy<FileInfo>(physicalFile)) { }
+	public VirtualFile(string name, string hash, Lazy<FileInfo> physicalFile)
 	{
 		this.Name = name;
 		this.OriginalHash = hash;
-		this.PhysicalFile = physicalFile;
+		this.PhysicalFileLazy = physicalFile;
 	}
 
 	/// <summary>

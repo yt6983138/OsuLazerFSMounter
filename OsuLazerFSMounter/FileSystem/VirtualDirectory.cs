@@ -6,6 +6,10 @@ public class VirtualDirectory : IVirtualFileSystemObject
 
 	public VirtualDirectory? Parent { get; internal set; }
 
+	/// <summary>
+	/// only used to determine the original database entry for this directory
+	/// </summary>
+	public Guid Identifier { get; set; }
 	public string Name { get; set; }
 	public IReadOnlyList<VirtualDirectory> Subdirectories => this._subdirectories;
 	public IReadOnlyList<VirtualFile> Files => this._files;
