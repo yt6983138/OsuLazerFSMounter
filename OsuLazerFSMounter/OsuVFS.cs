@@ -8,7 +8,6 @@ using osu.Game.Skinning;
 using OsuLazerFSMounter.FileSystem;
 using System.Collections.Concurrent;
 using System.Collections.Frozen;
-using System.Security.AccessControl;
 using System.Security.Cryptography;
 using FileAttributes_t = System.IO.FileAttributes; // bruh fsp uses pascal case parameter for some reason
 using FileInfo = System.IO.FileInfo;
@@ -62,6 +61,7 @@ public class OsuVFS : FileSystemBase
 			.ToFrozenDictionary(x => x.Name, x => x);
 	}
 
+	#region Realm related
 	private static string SanitizeFileName(string name)
 	{
 		foreach (char c in Path.GetInvalidFileNameChars())
@@ -162,6 +162,7 @@ public class OsuVFS : FileSystemBase
 			}
 		}
 	}
+	#endregion
 
 	private FSPFileInfo CreateInfo(FileInfo info)
 	{
@@ -189,11 +190,14 @@ public class OsuVFS : FileSystemBase
 		return info.Open(mode, access, share);
 	}
 
+
+	#region Miscellaneous
 	public override int ExceptionHandler(Exception ex)
 	{
 		this._logger.LogError(ex, "Unhandled exception.");
 		return base.ExceptionHandler(ex);
 	}
+	#endregion
 
 	#region Initialization, Finalization
 	public override int Init(object Host)
@@ -441,11 +445,6 @@ public class OsuVFS : FileSystemBase
 		}
 	}
 
-	public override int GetDirInfoByName(object FileNode, object FileDesc, string FileName, out string NormalizedName, out FSPFileInfo FileInfo)
-	{
-		// not implemented
-		return base.GetDirInfoByName(FileNode, FileDesc, FileName, out NormalizedName, out FileInfo);
-	}
 	public override int GetFileInfo(object FileNode, object FileDesc, out FSPFileInfo FileInfo)
 	{
 		if (FileDesc is FileDescriptor node)
@@ -463,22 +462,6 @@ public class OsuVFS : FileSystemBase
 		return STATUS_INVALID_PARAMETER;
 	}
 
-	public override int GetReparsePoint(object FileNode, object FileDesc, string FileName, ref byte[] ReparseData)
-	{
-		// not implemented
-		return base.GetReparsePoint(FileNode, FileDesc, FileName, ref ReparseData);
-	}
-	public override int GetReparsePointByName(string FileName, bool IsDirectory, ref byte[] ReparseData)
-	{
-		// not implemented
-		return base.GetReparsePointByName(FileName, IsDirectory, ref ReparseData);
-	}
-
-	public override int GetSecurity(object FileNode, object FileDesc, ref byte[] SecurityDescriptor)
-	{
-		// not implemented, security is not really that important in this case (prob will be a huge hole lmao)
-		return base.GetSecurity(FileNode, FileDesc, ref SecurityDescriptor);
-	}
 	public override int GetSecurityByName(string FileName, out uint FileAttributes, ref byte[] SecurityDescriptor)
 	{
 		this._logger.LogTrace("GetSecurityByName: {name}", FileName);
@@ -499,12 +482,6 @@ public class OsuVFS : FileSystemBase
 		return STATUS_OBJECT_NAME_NOT_FOUND;
 	}
 
-	public override bool GetStreamEntry(object FileNode, object FileDesc, ref object Context, out string StreamName, out ulong StreamSize, out ulong StreamAllocationSize)
-	{
-		// not implemented
-		return base.GetStreamEntry(FileNode, FileDesc, ref Context, out StreamName, out StreamSize, out StreamAllocationSize);
-	}
-
 	public override int GetVolumeInfo(out VolumeInfo VolumeInfo)
 	{
 		VolumeInfo = new()
@@ -516,11 +493,6 @@ public class OsuVFS : FileSystemBase
 		return STATUS_SUCCESS;
 	}
 
-	public override bool GetEaEntry(object FileNode, object FileDesc, ref object Context, out string EaName, out byte[] EaValue, out bool NeedEa)
-	{
-		// not implemented
-		return base.GetEaEntry(FileNode, FileDesc, ref Context, out EaName, out EaValue, out NeedEa);
-	}
 	#endregion
 
 	#region Write
@@ -605,27 +577,6 @@ public class OsuVFS : FileSystemBase
 			FileSize = NewSize
 		};
 		return STATUS_SUCCESS;
-	}
-	public override int SetReparsePoint(object FileNode, object FileDesc, string FileName, byte[] ReparseData)
-	{
-		// not implemented
-		return base.SetReparsePoint(FileNode, FileDesc, FileName, ReparseData);
-	}
-	public override int SetSecurity(object FileNode, object FileDesc, AccessControlSections Sections, byte[] SecurityDescriptor)
-	{
-		// not implemented, security is not really that important in this case (prob will be a huge hole lmao)
-		return base.SetSecurity(FileNode, FileDesc, Sections, SecurityDescriptor);
-	}
-	public override int SetVolumeLabel(string VolumeLabel, out VolumeInfo VolumeInfo)
-	{
-		// not implemented
-		return base.SetVolumeLabel(VolumeLabel, out VolumeInfo);
-	}
-
-	public override int SetEaEntry(object FileNode, object FileDesc, ref object Context, string EaName, byte[] EaValue, bool NeedEa)
-	{
-		// not implemented
-		return base.SetEaEntry(FileNode, FileDesc, ref Context, EaName, EaValue, NeedEa);
 	}
 	#endregion
 
@@ -800,24 +751,6 @@ public class OsuVFS : FileSystemBase
 		}
 
 		return STATUS_INVALID_PARAMETER;
-	}
-	public override int DeleteReparsePoint(object FileNode, object FileDesc, string FileName, byte[] ReparseData)
-	{
-		// not implemented
-		return base.DeleteReparsePoint(FileNode, FileDesc, FileName, ReparseData);
-	}
-	public override int SetDelete(object FileNode, object FileDesc, string FileName, bool DeleteFile)
-	{
-		// not implemented
-		return base.SetDelete(FileNode, FileDesc, FileName, DeleteFile);
-	}
-	#endregion
-
-	#region Miscellaneous
-	public override int Control(object FileNode, object FileDesc, uint ControlCode, nint InputBuffer, uint InputBufferLength, nint OutputBuffer, uint OutputBufferLength, out uint BytesTransferred)
-	{
-		// not implemented
-		return base.Control(FileNode, FileDesc, ControlCode, InputBuffer, InputBufferLength, OutputBuffer, OutputBufferLength, out BytesTransferred);
 	}
 	#endregion
 }
