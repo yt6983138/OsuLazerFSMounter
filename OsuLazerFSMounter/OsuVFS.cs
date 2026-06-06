@@ -9,6 +9,7 @@ using OsuLazerFSMounter.FileSystem;
 using System.Collections.Concurrent;
 using System.Collections.Frozen;
 using System.Security.AccessControl;
+using System.Security.Cryptography;
 using FileAttributes_t = System.IO.FileAttributes; // bruh fsp uses pascal case parameter for some reason
 using FileInfo = System.IO.FileInfo;
 using FSPFileInfo = Fsp.Interop.FileInfo;
@@ -208,13 +209,9 @@ public class OsuVFS : FileSystemBase
 		VirtualDirectory beatMapDir = this.RootDirectory.AddDirectory(VirtualPath.FromDirectory(nameof(OsuVFSBaseDirectoryType.Songs)));
 		VirtualDirectory skinDir = this.RootDirectory.AddDirectory(VirtualPath.FromDirectory(nameof(OsuVFSBaseDirectoryType.Skins)));
 
-		// optimized a bit but still a bit slow (1.5s for 650+ beatmap sets and 20skins)
 		Task.WaitAll(
 			Task.Run(() => this.GetBeatMapDirectories(beatMapDir)),
 			Task.Run(() => this.GetSkinDirectories(skinDir)));
-
-		//PreFetchFileInfoForFilesInBackground(beatMapDir);
-		//PreFetchFileInfoForFilesInBackground(skinDir);
 
 		this._logger.LogInformation("OsuVFS mounted, host: {Host}", Host);
 		return STATUS_SUCCESS;
@@ -227,40 +224,36 @@ public class OsuVFS : FileSystemBase
 	}
 	public override int Open(string FileName, uint CreateOptions, uint GrantedAccess, out object FileNode, out object FileDesc, out FSPFileInfo FileInfo, out string NormalizedName)
 	{
-		VirtualFile? file = this.RootDirectory.FindFile(VirtualPath.FromFile(FileName));
-		VirtualDirectory? dir = this.RootDirectory.FindDirectory(VirtualPath.FromDirectory(FileName));
-		// maybe we need a proper way to determine if the path is a file or directory instead 
-
-		if (file is not null)
-		{
-			this._logger.LogTrace("Open: File {name}", FileName);
-
-			FileDescriptor descriptor = new(file, this.OpenStreamDefault(file.PhysicalFile));
-			FileDesc = descriptor;
-			FileInfo = this.CreateInfo(file.PhysicalFile);
-		}
-		else if (dir is not null)
-		{
-			this._logger.LogTrace("Open: Directory {name}", FileName);
-
-			DirectoryDescriptor descriptor = new(dir);
-			FileDesc = descriptor;
-			FileInfo = this.CreateInfo(dir);
-		}
-		else
-		{
-			this._logger.LogWarning("Open: Not found {name}", FileName);
-
-			FileNode = null!;
-			FileDesc = null!;
-			FileInfo = default;
-			NormalizedName = null!;
-			return STATUS_OBJECT_NAME_NOT_FOUND;
-		}
-
 		NormalizedName = null!;
 		FileNode = null!;
 
+		VirtualDirectory? dir = this.RootDirectory.FindDirectory(VirtualPath.FromDirectory(FileName));
+		VirtualFile? file = this.RootDirectory.FindFile(VirtualPath.FromFile(FileName));
+
+		// the CreateOptions does not always specify whether it's opening a file or directory, so we need to check both
+		if (dir is not null)
+		{
+			DirectoryDescriptor directoryDescriptor = new(dir);
+			FileDesc = directoryDescriptor;
+			FileInfo = this.CreateInfo(dir);
+
+			this._logger.LogTrace("Open: Directory {name}", FileName);
+
+			return STATUS_SUCCESS;
+		}
+
+		if (file is null)
+		{
+			FileDesc = null!;
+			FileInfo = default;
+			return STATUS_OBJECT_NAME_NOT_FOUND;
+		}
+
+		this._logger.LogTrace("Open: File {name}", FileName);
+
+		FileDescriptor descriptor = new(file, this.OpenStreamDefault(file.PhysicalFile));
+		FileDesc = descriptor;
+		FileInfo = this.CreateInfo(file.PhysicalFile);
 		return STATUS_SUCCESS;
 	}
 	public override int Flush(object FileNode, object FileDesc, out FSPFileInfo FileInfo)
@@ -274,6 +267,8 @@ public class OsuVFS : FileSystemBase
 		}
 
 		node.Stream.Flush();
+		node.File.PhysicalFile.Refresh();
+
 		FileInfo = this.CreateInfo(node.File.PhysicalFile) with
 		{
 			FileSize = (ulong)node.Stream.Length,
@@ -292,37 +287,54 @@ public class OsuVFS : FileSystemBase
 
 		this._logger.LogTrace("Closed: {FileDesc}", FileDesc);
 
-		if (descriptor.DeleteOnClose) Delete(descriptor.VirtualObject);
-		descriptor.Dispose();
-
-		void Delete(IVirtualFileSystemObject obj)
+		if (descriptor.DeleteOnClose)
 		{
-			VirtualPath path = obj.GetFullPath();
-			if (obj is VirtualFile file)
+			IVirtualFileSystemObject vObj = descriptor.VirtualObject;
+			VirtualPath path = vObj.GetFullPath();
+
+			if (vObj is VirtualFile file)
 			{
+				//file.PhysicalFile.Delete();
+				// TODO: uncomment above line and also delete the file in realm
 				this.RootDirectory.RemoveFile(path);
-				// file.PhysicalFile.Delete();
-				this._logger.LogInformation("Deleted file {path}, hash: {hash}", path, file.OriginalHash);
 			}
-			else if (obj is VirtualDirectory dir)
+			else if (vObj is VirtualDirectory)
 			{
-				foreach (VirtualDirectory d in dir.Subdirectories)
-				{
-					Delete(d);
-				}
-				foreach (VirtualFile f in dir.Files)
-				{
-					Delete(f);
-				}
 				this.RootDirectory.RemoveDirectory(path);
-				this._logger.LogInformation("Deleted directory {path}", path);
-				// tbh i feel maybe we should optimize it by not iterating the tree for path
 			}
-			else
-			{
-				this._logger.LogWarning("Trying to delete an unknown type of object: {obj}", obj);
-			}
+
+			this._logger.LogDebug("{type} removed", vObj.GetType().Name);
+
+			goto Dispose;
 		}
+
+		if (descriptor is FileDescriptor fileDesc && fileDesc.HasEverWritten)
+		{
+			fileDesc.Stream.Seek(0, SeekOrigin.Begin);
+			byte[] hash = SHA256.HashData(fileDesc.Stream);
+			string hashString = Convert.ToHexString(hash).ToLower();
+
+			if (fileDesc.File.OriginalHash == hashString) goto Dispose;
+			// no need to change
+
+			DirectoryInfo newHashDir = this._cachedHashDirectories[hashString[..2]];
+			FileInfo newFile = new(Path.Combine(newHashDir.FullName, hashString));
+
+			// no need to replace the file
+			if (newFile.Exists) goto Dispose;
+
+			fileDesc.Stream.Dispose();
+			fileDesc.File.PhysicalFile.CopyTo(newFile.FullName);
+
+			// TODO: update corresponding file in realm
+		}
+		else if (descriptor is DirectoryDescriptor dirDesc && dirDesc.Directory.HasBeenRenamed)
+		{
+			// TODO: update all files in the folder in realm
+		}
+
+	Dispose:
+		descriptor.Dispose();
 	}
 	public override void Cleanup(object FileNode, object FileDesc, string FileName, uint Flags)
 	{
@@ -527,6 +539,8 @@ public class OsuVFS : FileSystemBase
 		Span<byte> span = new(Buffer.ToPointer(), (int)Length);
 		node.Stream.Seek((long)Offset, SeekOrigin.Begin);
 		node.Stream.Write(span);
+		node.HasEverWritten = true;
+
 		BytesTransferred = Length;
 		FileInfo = this.CreateInfo(node.File.PhysicalFile) with
 		{
@@ -548,6 +562,8 @@ public class OsuVFS : FileSystemBase
 		using ScopedSemaphoreSlim.Scope _ = node.Lock.Enter();
 		node.Stream.Dispose();
 		node.Stream = this.OpenStreamDefault(node.File.PhysicalFile, FileMode.Create);
+		node.HasEverWritten = true;
+
 		FileInfo = this.CreateInfo(node.File.PhysicalFile) with
 		{
 			FileSize = 0,
@@ -698,6 +714,12 @@ public class OsuVFS : FileSystemBase
 			VirtualPath oldDirPath = VirtualPath.FromDirectory(FileName);
 			VirtualPath newDirPath = VirtualPath.FromDirectory(NewFileName);
 
+			if (!oldDirPath.DirectorySegments[0..2].SequenceEqual(newDirPath.DirectorySegments[0..2]))
+			{
+				// only allows renaming within the same song-specific or skin-specific folder
+				return STATUS_NOT_SUPPORTED;
+			}
+
 			VirtualDirectory? targetDir = this.RootDirectory.FindDirectory(newDirPath);
 			if (targetDir is not null)
 			{
@@ -715,6 +737,7 @@ public class OsuVFS : FileSystemBase
 			this.RootDirectory.RemoveDirectory(oldDirPath);
 			this.RootDirectory.AddDirectory(oldDir, newDirPath.Mutate(x => x[..^1]));
 			oldDir.Name = newDirPath.DirectorySegments[^1];
+			oldDir.HasBeenRenamed = true;
 
 			return STATUS_SUCCESS;
 		}

@@ -6,6 +6,7 @@ public class FileDescriptor : IDescriptor
 	public FileStream Stream { get; set; }
 	public ScopedSemaphoreSlim Lock { get; } = new(1, 1);
 	public bool DeleteOnClose { get; set; }
+	public bool HasEverWritten { get; set; }
 
 	IVirtualFileSystemObject IDescriptor.VirtualObject => this.File;
 

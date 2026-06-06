@@ -11,6 +11,7 @@ public class VirtualDirectory : IVirtualFileSystemObject
 	/// </summary>
 	public Guid Identifier { get; set; }
 	public string Name { get; set; }
+	public bool HasBeenRenamed { get; set; } = false;
 	public IReadOnlyList<VirtualDirectory> Subdirectories => this._subdirectories;
 	public IReadOnlyList<VirtualFile> Files => this._files;
 
