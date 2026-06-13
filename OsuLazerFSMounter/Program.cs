@@ -3,7 +3,7 @@ internal class Program
 {
 	private static int Main(string[] args)
 	{
-		OsuVFSService service = new();
+		OsuVFSConsoleService service = new();
 		return service.Run();
 	}
 }

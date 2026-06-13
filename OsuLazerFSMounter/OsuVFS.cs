@@ -50,9 +50,9 @@ public class OsuVFS : FileSystemBase
 
 	public RealmAccess RealmAccess { get; private init; }
 	public DirectoryInfo FilesFolder { get; private init; }
-	public string? VolumeLabel { get; set; }
+	public OsuVFSOption Option { get; private init; }
 
-	public OsuVFS(RealmAccess realm, DirectoryInfo hashFileStorage, ILogger<OsuVFS> logger)
+	public OsuVFS(RealmAccess realm, DirectoryInfo hashFileStorage, ILogger<OsuVFS> logger, OsuVFSOption option)
 	{
 		this.RealmAccess = realm;
 		this.FilesFolder = hashFileStorage;
@@ -61,6 +61,7 @@ public class OsuVFS : FileSystemBase
 			.Where(x => x.Name.Length == 1 && char.IsAsciiHexDigitLower(x.Name[0]))
 			.SelectMany(y => y.GetDirectories().Where(x => x.Name.Length == 2 && x.Name.All(char.IsAsciiHexDigitLower)))
 			.ToFrozenDictionary(x => x.Name, x => x);
+		this.Option = option;
 	}
 
 	#region Realm related
@@ -104,6 +105,13 @@ public class OsuVFS : FileSystemBase
 			this._logger.LogWarning("Failed to find physical file for hash {hash}, creating an empty file as fallback", self.OriginalHash);
 			physical = new(Path.Combine(this._tempFolder.FullName, Path.GetRandomFileName()));
 			physical.Create().Dispose();
+			self.OriginalHash = "";
+		}
+
+		if (this.Option.ReadOnly)
+		{
+			// no writing so we don't have to care about multiple files pointing to same file
+			return physical;
 		}
 
 		if (this._reverseHashFileDictionary.TryGetValue(self.OriginalHash, out ReverseHashInfo? info))
@@ -297,6 +305,23 @@ public class OsuVFS : FileSystemBase
 	{
 		FileNode = null!;
 
+		bool deleteOnClose = CreateOptions.HasFlag(FILE_DELETE_ON_CLOSE);
+		if (deleteOnClose && this.Option.ReadOnly)
+		{
+			FileDesc = null!;
+			FileInfo = default;
+			NormalizedName = null!;
+			return STATUS_MEDIA_WRITE_PROTECTED;
+		}
+
+		if (deleteOnClose && !this.IsValidWriteOperation(FileName))
+		{
+			FileDesc = null!;
+			FileInfo = default;
+			NormalizedName = null!;
+			return STATUS_INVALID_DEVICE_REQUEST;
+		}
+
 		using ScopedSemaphoreSlim.Scope _ = this.RootDirectoryLock.Enter();
 
 		VirtualDirectory? dir = this.RootDirectory.FindDirectory(VirtualPath.FromDirectory(FileName), StringComparison.OrdinalIgnoreCase);
@@ -305,7 +330,18 @@ public class OsuVFS : FileSystemBase
 		// the CreateOptions does not always specify whether it's opening a file or directory, so we need to check both
 		if (dir is not null)
 		{
-			DirectoryDescriptor directoryDescriptor = new(dir);
+			if (deleteOnClose && !dir.IsEmpty)
+			{
+				FileDesc = null!;
+				FileInfo = default;
+				NormalizedName = null!;
+				return STATUS_DIRECTORY_NOT_EMPTY;
+			}
+
+			DirectoryDescriptor directoryDescriptor = new(dir)
+			{
+				DeleteOnClose = deleteOnClose
+			};
 			FileDesc = directoryDescriptor;
 			FileInfo = this.CreateInfo(dir);
 			NormalizedName = dir.GetFullPath().ToString("BE", null);
@@ -325,7 +361,10 @@ public class OsuVFS : FileSystemBase
 
 		this._logger.LogTrace("Open: File {name}", FileName);
 
-		FileDescriptor descriptor = new(file, this.OpenStreamDefault(file.PhysicalFile));
+		FileDescriptor descriptor = new(file, this.OpenStreamDefault(file.PhysicalFile))
+		{
+			DeleteOnClose = deleteOnClose
+		};
 		FileDesc = descriptor;
 		FileInfo = this.CreateInfo(file.PhysicalFile);
 		NormalizedName = file.GetFullPath().ToString("BE", null);
@@ -365,6 +404,9 @@ public class OsuVFS : FileSystemBase
 
 		using ScopedSemaphoreSlim.Scope _ = this.RootDirectoryLock.Enter();
 
+		if (this.Option.ReadOnly)
+			goto Dispose;
+
 		if (descriptor.DeleteOnClose)
 		{
 			IVirtualFileSystemObject vObj = descriptor.VirtualObject;
@@ -372,7 +414,8 @@ public class OsuVFS : FileSystemBase
 
 			if (vObj is VirtualFile file)
 			{
-				file.PhysicalFile.Delete();
+				// let osu cleanup the file
+				// file.PhysicalFile.Delete();
 				this.RootDirectory.RemoveFile(path);
 			}
 			else if (vObj is VirtualDirectory)
@@ -393,19 +436,19 @@ public class OsuVFS : FileSystemBase
 			string hashString = Convert.ToHexString(hash).ToLower();
 
 			if (fileDesc.File.OriginalHash == hashString) goto Dispose;
-			// no need to change
 
 			DirectoryInfo newHashDir = this._cachedHashDirectories[hashString[..2]];
 			FileInfo newFile = new(Path.Combine(newHashDir.FullName, hashString));
 
 			// no need to replace the file
-			if (newFile.Exists) goto Dispose;
+			if (newFile.Exists) goto Update;
 
 			fileDesc.Stream.Dispose();
 			fileDesc.File.PhysicalFile.CopyTo(newFile.FullName);
 			fileDesc.File.PhysicalFile = newFile;
 			fileDesc.File.OriginalHash = hashString;
 
+		Update:
 			this.UpdateRealm(fileDesc.File);
 		}
 		else if (descriptor is DirectoryDescriptor dirDesc && dirDesc.Directory.HasBeenRenamed)
@@ -569,7 +612,7 @@ public class OsuVFS : FileSystemBase
 			FreeSize = 0,
 			TotalSize = 0,
 		};
-		VolumeInfo.SetVolumeLabel(this.VolumeLabel);
+		VolumeInfo.SetVolumeLabel(this.Option.VolumeLabel);
 		return STATUS_SUCCESS;
 	}
 
@@ -579,6 +622,13 @@ public class OsuVFS : FileSystemBase
 	public override unsafe int Write(object FileNode, object FileDesc, nint Buffer, ulong Offset, uint Length, bool WriteToEndOfFile, bool ConstrainedIo, out uint BytesTransferred, out FSPFileInfo FileInfo)
 	{
 		this._logger.LogDebug("Write: {FileDesc}", FileDesc);
+
+		if (this.Option.ReadOnly)
+		{
+			BytesTransferred = 0;
+			FileInfo = default;
+			return STATUS_MEDIA_WRITE_PROTECTED;
+		}
 
 		if (FileDesc is not FileDescriptor node)
 		{
@@ -605,6 +655,12 @@ public class OsuVFS : FileSystemBase
 	{
 		this._logger.LogDebug("Overwrite: {FileDesc}", FileDesc);
 
+		if (this.Option.ReadOnly)
+		{
+			FileInfo = default;
+			return STATUS_MEDIA_WRITE_PROTECTED;
+		}
+
 		if (FileDesc is not FileDescriptor node)
 		{
 			FileInfo = default;
@@ -624,14 +680,15 @@ public class OsuVFS : FileSystemBase
 		return STATUS_SUCCESS;
 	}
 
-	public override int SetBasicInfo(object FileNode, object FileDesc, uint FileAttributes, ulong CreationTime, ulong LastAccessTime, ulong LastWriteTime, ulong ChangeTime, out FSPFileInfo FileInfo)
-	{
-		// not implemented
-		return base.SetBasicInfo(FileNode, FileDesc, FileAttributes, CreationTime, LastAccessTime, LastWriteTime, ChangeTime, out FileInfo);
-	}
 	public override int SetFileSize(object FileNode, object FileDesc, ulong NewSize, bool SetAllocationSize, out FSPFileInfo FileInfo)
 	{
 		this._logger.LogDebug("SetFileSize: {FileDesc}, {size}", FileDesc, NewSize);
+
+		if (this.Option.ReadOnly)
+		{
+			FileInfo = default;
+			return STATUS_MEDIA_WRITE_PROTECTED;
+		}
 
 		if (FileDesc is not FileDescriptor node)
 		{
@@ -676,6 +733,15 @@ public class OsuVFS : FileSystemBase
 	public override int Create(string FileName, uint CreateOptions, uint GrantedAccess, uint FileAttributes, byte[] SecurityDescriptor, ulong AllocationSize, out object FileNode, out object FileDesc, out FSPFileInfo FileInfo, out string NormalizedName)
 	{
 		this._logger.LogInformation("Create: {name}, {attr}", FileName, (FileAttributes_t)FileAttributes);
+
+		if (this.Option.ReadOnly)
+		{
+			FileNode = null!;
+			FileDesc = null!;
+			FileInfo = default;
+			NormalizedName = null!;
+			return STATUS_MEDIA_WRITE_PROTECTED;
+		}
 
 		if (!this.IsValidWriteOperation(FileName))
 		{
@@ -764,6 +830,11 @@ public class OsuVFS : FileSystemBase
 	public override int Rename(object FileNode, object FileDesc, string FileName, string NewFileName, bool ReplaceIfExists)
 	{
 		this._logger.LogInformation("Rename: [overwrite: {ow}] {old} to {new}", ReplaceIfExists, FileName, NewFileName);
+
+		if (this.Option.ReadOnly)
+		{
+			return STATUS_MEDIA_WRITE_PROTECTED;
+		}
 
 		if (!this.IsValidWriteOperation(NewFileName) || !this.IsValidWriteOperation(FileName))
 		{
@@ -864,6 +935,11 @@ public class OsuVFS : FileSystemBase
 	}
 	public override int CanDelete(object FileNode, object FileDesc, string FileName)
 	{
+		if (this.Option.ReadOnly)
+		{
+			return STATUS_MEDIA_WRITE_PROTECTED;
+		}
+
 		if (!this.IsValidWriteOperation(FileName))
 		{
 			return STATUS_NOT_SUPPORTED;

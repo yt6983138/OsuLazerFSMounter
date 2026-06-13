@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "OsuLazerFSMounter": {
+      "commandName": "Project",
+      "commandLineArgs": ""
+    }
+  }
+}
