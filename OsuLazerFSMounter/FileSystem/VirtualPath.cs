@@ -1,5 +1,8 @@
-﻿namespace OsuLazerFSMounter.FileSystem;
-public struct VirtualPath
+﻿using System.Diagnostics.CodeAnalysis;
+using System.Numerics;
+
+namespace OsuLazerFSMounter.FileSystem;
+public struct VirtualPath : IFormattable, IEquatable<VirtualPath>, IEqualityOperators<VirtualPath, VirtualPath, bool>
 {
 	public string[] FullSegments { get; set; }
 
@@ -35,9 +38,62 @@ public struct VirtualPath
 		return new(pathSegments);
 	}
 
+	public static bool operator !=(VirtualPath left, VirtualPath right)
+	{
+		return !(left == right);
+	}
+	public static bool operator ==(VirtualPath left, VirtualPath right)
+	{
+		return left.FullSegments.SequenceEqual(right.FullSegments);
+	}
+
+	public readonly bool Equals(VirtualPath other)
+	{
+		return this == other;
+	}
+
+	public override readonly bool Equals([NotNullWhen(true)] object? obj)
+	{
+		if (obj is not VirtualPath other)
+			return false;
+
+		return this == other;
+	}
+	public override readonly int GetHashCode()
+	{
+		return HashCode.Combine(this.FullSegments);
+	}
+	/// <summary>
+	/// can contain few flags: (E)nd with slash for directories, (S)tart with slash, (B)ackslash as separator.
+	/// 
+	/// multiple flags can be combined, ex. "ES".
+	/// 
+	/// default is "ES"
+	/// </summary>
+	/// <param name="format"></param>
+	/// <param name="formatProvider"></param>
+	/// <returns></returns>
+	public readonly string ToString(string? format, IFormatProvider? formatProvider)
+	{
+		format = format?.Trim() ?? "";
+
+		bool endWithSlash = format.Contains('E');
+		bool startWithSlash = format.Contains('S');
+		bool useBackslash = format.Contains('B');
+
+		char separator = useBackslash ? '\\' : '/';
+
+		string result = string.Join(separator, this.FullSegments);
+		if (!endWithSlash)
+			result = result.TrimEnd(separator);
+		if (startWithSlash)
+			result = separator + result;
+
+		return result;
+	}
 	public override readonly string ToString()
 	{
-		return $"{string.Join('/', this.FullSegments)}";
+		return this.ToString("ES", null);
 	}
 
 	public readonly VirtualPath AppendDirectory(params IEnumerable<string> segments)
@@ -49,6 +105,16 @@ public struct VirtualPath
 		if (this.HasFileName)
 			return new(this.FullSegments.Concat(segments).ToArray());
 		else return new(this.FullSegments.Take(this.FullSegments.Length - 1).Concat(segments).ToArray());
+	}
+
+	public readonly VirtualPath GetDirectoryRange(Range range, bool leaveFileName = false)
+	{
+		VirtualPath result = new([.. this.DirectorySegments[range], ""]);
+		if (leaveFileName)
+		{
+			result = result.WithFileName(this.FileName);
+		}
+		return result;
 	}
 	public readonly VirtualPath Mutate(Func<string[], string[]> mutator)
 	{

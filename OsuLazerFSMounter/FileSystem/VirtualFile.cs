@@ -13,8 +13,6 @@ public class VirtualFile : IVirtualFileSystemObject
 	}
 	public Lazy<FileInfo> PhysicalFileLazy { get; set; }
 
-	public bool IsNewlyCreated => string.IsNullOrEmpty(this.OriginalHash);
-
 	public VirtualFile(string name, string hash, FileInfo physicalFile)
 		: this(name, hash, new Lazy<FileInfo>(physicalFile)) { }
 	public VirtualFile(string name, string hash, Lazy<FileInfo> physicalFile)
@@ -24,10 +22,6 @@ public class VirtualFile : IVirtualFileSystemObject
 		this.PhysicalFileLazy = physicalFile;
 	}
 
-	/// <summary>
-	/// this locks the file and all of its parent directories, and returns the full path of this file
-	/// </summary>
-	/// <returns></returns>
 	public VirtualPath GetFullPath()
 	{
 		if (this.Parent is null)

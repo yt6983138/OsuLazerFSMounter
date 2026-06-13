@@ -31,66 +31,62 @@ public class VirtualDirectory : IVirtualFileSystemObject
 			pathSegments.Add(current.Name);
 			current = current.Parent;
 		}
+		// remove the root directory's name
+		pathSegments.RemoveAt(pathSegments.Count - 1);
 		pathSegments.Reverse();
 		pathSegments.Add("");
 		return new(pathSegments.ToArray());
 	}
 
-	/// <summary>
-	/// this method locks this directory and all of its subdirectories leading to the file
-	/// </summary>
-	/// <param name="path"></param>
-	/// <returns></returns>
-	/// <exception cref="ArgumentException"></exception>
-	public VirtualFile? FindFile(VirtualPath path)
+	public VirtualFile? FindFile(VirtualPath path, StringComparison comparer = StringComparison.Ordinal)
 	{
 		if (path.FullSegments.Length == 0) return null;
 
 		if (!path.HasFileName)
 			return null;
 
-		return this.FindFileInternal(path.FullSegments, 0);
+		return this.FindFileInternal(path.FullSegments, 0, comparer);
 	}
-	private VirtualFile? FindFileInternal(string[] paths, int index)
+	private VirtualFile? FindFileInternal(string[] paths, int index, StringComparison comparer)
 	{
 		if (index == paths.Length - 1)
 		{
-			return this.Files.FirstOrDefault(f => f.Name == paths[index]);
+			return this.Files.FirstOrDefault(f => f.Name.Equals(paths[index], comparer));
 		}
 		else
 		{
-			VirtualDirectory? subdir = this.Subdirectories.FirstOrDefault(d => d.Name == paths[index]);
+			VirtualDirectory? subdir = this.Subdirectories.FirstOrDefault(d => d.Name.Equals(paths[index], comparer));
 			if (subdir is null)
 				return null;
-			return subdir.FindFileInternal(paths, index + 1);
+			return subdir.FindFileInternal(paths, index + 1, comparer);
 		}
 	}
 
 	/// <summary>
-	/// this method locks this directory and all of its subdirectories leading to the directory
+	/// This method will only check using directory segments, and will not consider the file name at the end of the path, even if it exists
 	/// </summary>
 	/// <param name="path"></param>
 	/// <returns></returns>
-	public VirtualDirectory? FindDirectory(VirtualPath path)
+	public VirtualDirectory? FindDirectory(VirtualPath path, StringComparison comparer = StringComparison.Ordinal)
 	{
 		if (path.DirectorySegments.Length == 0 || path.DirectorySegments[0] == "")
 			return this;
 
-		return this.FindDirectoryInternal(path.DirectorySegments, 0);
+		return this.FindDirectoryInternal(path.DirectorySegments, 0, comparer);
 	}
-	private VirtualDirectory? FindDirectoryInternal(Span<string> paths, int index)
+	private VirtualDirectory? FindDirectoryInternal(Span<string> paths, int index, StringComparison comparer)
 	{
 		string current = paths[index];
 		if (index == paths.Length - 1)
 		{
-			return this.Subdirectories.FirstOrDefault(d => d.Name == current);
+			return this.Subdirectories.FirstOrDefault(d => d.Name.Equals(current, comparer));
 		}
 		else
 		{
-			VirtualDirectory? subdir = this.Subdirectories.FirstOrDefault(d => d.Name == current);
+			VirtualDirectory? subdir = this.Subdirectories.FirstOrDefault(d => d.Name.Equals(current, comparer));
 			if (subdir is null)
 				return null;
-			return subdir.FindDirectoryInternal(paths, index + 1);
+			return subdir.FindDirectoryInternal(paths, index + 1, comparer);
 		}
 	}
 
@@ -108,55 +104,61 @@ public class VirtualDirectory : IVirtualFileSystemObject
 		this._subdirectories.Clear();
 	}
 
-	public bool RemoveFile(VirtualPath path)
+	public bool RemoveFile(VirtualPath path, StringComparison comparer = StringComparison.Ordinal)
 	{
 		if (path.FullSegments.Length == 0) return false;
 		if (!path.HasFileName)
 			throw new ArgumentException("Path must end with a file name, not a directory", nameof(path));
 
-		return this.RemoveFileInternal(path.FullSegments, 0);
+		return this.RemoveFileInternal(path.FullSegments, 0, comparer);
 	}
-	private bool RemoveFileInternal(string[] paths, int index)
+	private bool RemoveFileInternal(string[] paths, int index, StringComparison comparer)
 	{
 		if (index == paths.Length - 1)
 		{
-			bool hasAny = this._files.Any(f => f.Name == paths[index]);
-			this._files.RemoveAll(f => f.Name == paths[index]);
+			bool hasAny = this._files.Any(f => f.Name.Equals(paths[index], comparer));
+			this._files.RemoveAll(f => f.Name.Equals(paths[index], comparer));
 			return hasAny;
 		}
 		else
 		{
-			VirtualDirectory? subdir = this.Subdirectories.FirstOrDefault(d => d.Name == paths[index]);
+			VirtualDirectory? subdir = this.Subdirectories.FirstOrDefault(d => d.Name.Equals(paths[index], comparer));
 			if (subdir is null)
 				return false;
-			return subdir.RemoveFileInternal(paths, index + 1);
+			return subdir.RemoveFileInternal(paths, index + 1, comparer);
 		}
 	}
 
-	public bool RemoveDirectory(VirtualPath path)
+	/// <inheritdoc cref="FindDirectory(VirtualPath, StringComparison)"/>
+	public bool RemoveDirectory(VirtualPath path, StringComparison comparer = StringComparison.Ordinal)
 	{
 		if (path.DirectorySegments.Length == 0)
 			return false;
-		return this.RemoveDirectoryInternal(path.DirectorySegments, 0);
+		return this.RemoveDirectoryInternal(path.DirectorySegments, 0, comparer);
 	}
-	private bool RemoveDirectoryInternal(Span<string> paths, int index)
+	private bool RemoveDirectoryInternal(Span<string> paths, int index, StringComparison comparer)
 	{
 		string current = paths[index];
 		if (index == paths.Length - 1)
 		{
-			bool hasAny = this._subdirectories.Any(d => d.Name == current);
-			this._subdirectories.RemoveAll(d => d.Name == current);
+			bool hasAny = this._subdirectories.Any(d => d.Name.Equals(current, comparer));
+			this._subdirectories.RemoveAll(d => d.Name.Equals(current, comparer));
 			return hasAny;
 		}
 		else
 		{
-			VirtualDirectory? subdir = this.Subdirectories.FirstOrDefault(d => d.Name == current);
+			VirtualDirectory? subdir = this.Subdirectories.FirstOrDefault(d => d.Name.Equals(current, comparer));
 			if (subdir is null)
 				return false;
-			return subdir.RemoveDirectoryInternal(paths, index + 1);
+			return subdir.RemoveDirectoryInternal(paths, index + 1, comparer);
 		}
 	}
 
+	/// <summary>
+	/// The path is only for specifying the directory to put the file in, file name is ignored
+	/// </summary>
+	/// <param name="file"></param>
+	/// <param name="path"></param>
 	public void AddFile(VirtualFile file, VirtualPath? path = null)
 	{
 		VirtualPath pathOrEmpty = path ?? new("");
@@ -196,6 +198,8 @@ public class VirtualDirectory : IVirtualFileSystemObject
 	/// <summary>
 	/// this will add the directory into the path specified by the path parameter, 
 	/// eg. add dir "a" with path "b/c/" will create directory "a" inside directory "c", which is inside directory "b".
+	/// 
+	/// The path is only for specifying the directory to put the directory in, if the path ends with a file name, it will be ignored.
 	/// </summary>
 	/// <param name="dir"></param>
 	/// <param name="path"></param>
