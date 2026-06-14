@@ -1,0 +1,3 @@
+[submodule "OsuBase"]
+	path = OsuBase
+	url = https://github.com/ppy/osu.git

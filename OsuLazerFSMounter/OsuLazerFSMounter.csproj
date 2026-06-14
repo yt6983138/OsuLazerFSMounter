@@ -16,7 +16,7 @@
 	</ItemGroup>
 
 	<ItemGroup Condition="'$(Configuration)' == 'Debug'">
-		<ProjectReference Include="..\..\osu\osu.Game\osu.Game.csproj" />
+		<ProjectReference Include="..\OsuBase\osu.Game\osu.Game.csproj" />
 	</ItemGroup>
 	
 	<ItemGroup Condition="'$(Configuration)' == 'Release'">

@@ -1,15 +1,26 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
-		<OutputType>Exe</OutputType>
 		<TargetFramework>net8.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<LangVersion>preview</LangVersion>
 	</PropertyGroup>
 
+	<PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+		<OutputType>Exe</OutputType>
+	</PropertyGroup>
+
+	<PropertyGroup Condition="'$(Configuration)' == 'Release'">
+		<OutputType>Library</OutputType>
+	</PropertyGroup>
+
 	<ItemGroup>
 		<ProjectReference Include="..\OsuLazerFSMounter\OsuLazerFSMounter.csproj" />
+	</ItemGroup>
+	
+	<ItemGroup Condition="'$(Configuration)' == 'Debug'">
+		<ProjectReference Include="..\OsuBase\osu.Desktop\osu.Desktop.csproj" />
 	</ItemGroup>
 
 </Project>
