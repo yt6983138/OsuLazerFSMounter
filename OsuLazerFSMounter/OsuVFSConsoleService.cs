@@ -72,15 +72,9 @@ public class OsuVFSConsoleService : Service
 		string mountPoint;
 		if (!mountPointRaw.HasValue)
 		{
-			char[] usedLetters = DriveInfo.GetDrives().Select(d => d.Name[0]).ToArray();
-			List<char> availableLetters = "CDEFGHIJKLMNOPQRSTUVWXYZ".ToList();
-			availableLetters.RemoveAll(c => usedLetters.Contains(c));
-			if (availableLetters.Count == 0)
-			{
-				this._logger.LogError("No available drive letters to mount the virtual file system.");
-				return;
-			}
-
+			List<char> availableLetters = Helper.GetAvailableDriveLetters();
+			availableLetters.Remove('A');
+			availableLetters.Remove('B');
 			mountPoint = availableLetters[0] + ":";
 		}
 		else

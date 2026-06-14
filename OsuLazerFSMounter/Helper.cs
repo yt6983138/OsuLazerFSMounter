@@ -53,4 +53,12 @@ public static class Helper
 
 		return replacement.Concat(a.Skip(prefixToReplace.Length)).ToArray();
 	}
+	public static List<char> GetAvailableDriveLetters()
+	{
+		char[] usedLetters = DriveInfo.GetDrives().Select(d => d.Name[0]).ToArray();
+		List<char> availableLetters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".ToList();
+		availableLetters.RemoveAll(c => usedLetters.Contains(c));
+
+		return availableLetters;
+	}
 }

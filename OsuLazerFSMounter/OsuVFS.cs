@@ -67,11 +67,22 @@ public class OsuVFS : FileSystemBase
 	#region Realm related
 	private static string SanitizeFileName(string name)
 	{
-		foreach (char c in Path.GetInvalidFileNameChars())
+		if (name == "." || name == "..")
+			return $"_{name}";
+
+		string illegalChars = "\"*/:<>?\\|\0";
+
+		char[] newName = name.ToArray();
+		foreach (char item in illegalChars)
 		{
-			name = name.Replace(c, '_');
+			newName.Replace(item, '_');
 		}
-		return name;
+		for (int i = 0; i < newName.Length; i++)
+		{
+			if (char.IsControl(newName[i])) newName[i] = '_';
+		}
+
+		return new(newName);
 	}
 
 	private void AddFileToDirectoryAndReverseHash(VirtualDirectory dir, RealmFileInfo file)
@@ -266,6 +277,11 @@ public class OsuVFS : FileSystemBase
 		return info.Open(mode, access, share);
 	}
 
+	private static void SetNormalizedPath(VirtualPath path, out string NormalizedName)
+	{
+		NormalizedName = path.ToString("SB", null);
+	}
+
 	#region Miscellaneous
 	public override int ExceptionHandler(Exception ex)
 	{
@@ -344,7 +360,7 @@ public class OsuVFS : FileSystemBase
 			};
 			FileDesc = directoryDescriptor;
 			FileInfo = this.CreateInfo(dir);
-			NormalizedName = dir.GetFullPath().ToString("BE", null);
+			SetNormalizedPath(dir.GetFullPath(), out NormalizedName);
 
 			this._logger.LogTrace("Open: Directory {name}", FileName);
 
@@ -367,7 +383,7 @@ public class OsuVFS : FileSystemBase
 		};
 		FileDesc = descriptor;
 		FileInfo = this.CreateInfo(file.PhysicalFile);
-		NormalizedName = file.GetFullPath().ToString("BE", null);
+		SetNormalizedPath(file.GetFullPath(), out NormalizedName);
 
 		return STATUS_SUCCESS;
 	}
@@ -786,7 +802,7 @@ public class OsuVFS : FileSystemBase
 			FileNode = null!;
 			FileDesc = new DirectoryDescriptor(dir);
 			FileInfo = this.CreateInfo(dir);
-			NormalizedName = dir.GetFullPath().ToString("BE", null);
+			SetNormalizedPath(dir.GetFullPath(), out NormalizedName);
 			return STATUS_SUCCESS;
 		}
 		else
@@ -823,7 +839,7 @@ public class OsuVFS : FileSystemBase
 				HasEverWritten = true // to make Close update realm
 			};
 			FileInfo = this.CreateInfo(physicalFile);
-			NormalizedName = file.GetFullPath().ToString("BE", null);
+			SetNormalizedPath(file.GetFullPath(), out NormalizedName);
 			return STATUS_SUCCESS;
 		}
 	}

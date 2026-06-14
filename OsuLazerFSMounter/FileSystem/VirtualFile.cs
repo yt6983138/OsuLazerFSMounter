@@ -1,5 +1,8 @@
-﻿namespace OsuLazerFSMounter.FileSystem;
+﻿using System.Diagnostics;
 
+namespace OsuLazerFSMounter.FileSystem;
+
+[DebuggerDisplay("File {Name}")]
 public class VirtualFile : IVirtualFileSystemObject
 {
 	public VirtualDirectory? Parent { get; internal set; }

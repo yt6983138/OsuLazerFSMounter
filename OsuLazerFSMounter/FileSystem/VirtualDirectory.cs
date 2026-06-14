@@ -1,4 +1,8 @@
-﻿namespace OsuLazerFSMounter.FileSystem;
+﻿using System.Diagnostics;
+
+namespace OsuLazerFSMounter.FileSystem;
+
+[DebuggerDisplay("Dir {Name}, {Files.Count} files, {Subdirectories.Count} sub-dirs")]
 public class VirtualDirectory : IVirtualFileSystemObject
 {
 	private readonly List<VirtualDirectory> _subdirectories = [];
