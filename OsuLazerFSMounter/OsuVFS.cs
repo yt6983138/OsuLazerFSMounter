@@ -6,6 +6,7 @@ using osu.Game.Database;
 using osu.Game.Models;
 using osu.Game.Skinning;
 using OsuLazerFSMounter.FileSystem;
+using OsuLazerFSMounter.Utility;
 using Realms;
 using System.Collections.Concurrent;
 using System.Collections.Frozen;
@@ -45,8 +46,7 @@ public class OsuVFS : FileSystemBase
 	private readonly ConcurrentDictionary<string, ReverseHashInfo> _reverseHashFileDictionary = new();
 	private readonly DirectoryInfo _tempFolder = Directory.CreateTempSubdirectory("osu_vfs_");
 
-	public VirtualDirectory RootDirectory { get; set; } = new("");
-	public ScopedSemaphoreSlim RootDirectoryLock { get; } = new(1, 1);
+	public ResourceAccessor<VirtualDirectory> RootDirectory { get; } = new(1, 1, new(""));
 
 	public RealmAccess RealmAccess { get; private init; }
 	public DirectoryInfo FilesFolder { get; private init; }
@@ -188,15 +188,14 @@ public class OsuVFS : FileSystemBase
 	}
 
 	/// <inheritdoc cref="UpdateRealm(VirtualDirectory, OsuVFSBaseDirectoryType)"/>
-	private void UpdateRealm(IVirtualFileSystemObject child)
+	private void UpdateRealm(IVirtualFileSystemObject child, VirtualDirectory rootDirectory)
 	{
 		VirtualPath path = child.GetFullPath();
 		OsuVFSBaseDirectoryType kind = Enum.Parse<OsuVFSBaseDirectoryType>(path.DirectorySegments[0], true);
-		this.UpdateRealm(this.RootDirectory.FindDirectory(path.GetDirectoryRange(0..2)).ThrowIfNull(), kind);
+		this.UpdateRealm(rootDirectory.FindDirectory(path.GetDirectoryRange(0..2)).ThrowIfNull(), kind);
 	}
 	/// <summary>
 	/// update realm for the directory of the skin of song folder (/Skins/xxxxx/) or (/Songs/xxxxx/).
-	/// you are supposed to enter the root directory lock yourself
 	/// </summary>
 	/// <param name="directory"></param>
 	private void UpdateRealm(VirtualDirectory directory, OsuVFSBaseDirectoryType kind)
@@ -299,10 +298,10 @@ public class OsuVFS : FileSystemBase
 	}
 	public override int Mounted(object Host)
 	{
-		using ScopedSemaphoreSlim.Scope _ = this.RootDirectoryLock.Enter();
+		using ResourceAccessor<VirtualDirectory>.AccessorScope accessor = this.RootDirectory.EnterAccessorScope();
 
-		VirtualDirectory beatMapDir = this.RootDirectory.AddDirectory(VirtualPath.FromDirectory(nameof(OsuVFSBaseDirectoryType.Songs)));
-		VirtualDirectory skinDir = this.RootDirectory.AddDirectory(VirtualPath.FromDirectory(nameof(OsuVFSBaseDirectoryType.Skins)));
+		VirtualDirectory beatMapDir = accessor.Value.AddDirectory(VirtualPath.FromDirectory(nameof(OsuVFSBaseDirectoryType.Songs)));
+		VirtualDirectory skinDir = accessor.Value.AddDirectory(VirtualPath.FromDirectory(nameof(OsuVFSBaseDirectoryType.Skins)));
 
 		Task.WaitAll(
 			Task.Run(() => this.GetBeatMapDirectories(beatMapDir)),
@@ -313,8 +312,8 @@ public class OsuVFS : FileSystemBase
 	}
 	public override void Unmounted(object Host)
 	{
-		using ScopedSemaphoreSlim.Scope _ = this.RootDirectoryLock.Enter();
-		this.RootDirectory.RemoveAll();
+		using ResourceAccessor<VirtualDirectory>.AccessorScope accessor = this.RootDirectory.EnterAccessorScope();
+		accessor.Value.RemoveAll();
 		this._logger.LogInformation("OsuVFS unmounted, host: {Host}", Host);
 	}
 	public override int Open(string FileName, uint CreateOptions, uint GrantedAccess, out object FileNode, out object FileDesc, out FSPFileInfo FileInfo, out string NormalizedName)
@@ -338,10 +337,10 @@ public class OsuVFS : FileSystemBase
 			return STATUS_INVALID_DEVICE_REQUEST;
 		}
 
-		using ScopedSemaphoreSlim.Scope _ = this.RootDirectoryLock.Enter();
+		using ResourceAccessor<VirtualDirectory>.AccessorScope accessor = this.RootDirectory.EnterAccessorScope();
 
-		VirtualDirectory? dir = this.RootDirectory.FindDirectory(VirtualPath.FromDirectory(FileName), StringComparison.OrdinalIgnoreCase);
-		VirtualFile? file = this.RootDirectory.FindFile(VirtualPath.FromFile(FileName), StringComparison.OrdinalIgnoreCase);
+		VirtualDirectory? dir = accessor.Value.FindDirectory(VirtualPath.FromDirectory(FileName), StringComparison.OrdinalIgnoreCase);
+		VirtualFile? file = accessor.Value.FindFile(VirtualPath.FromFile(FileName), StringComparison.OrdinalIgnoreCase);
 
 		// the CreateOptions does not always specify whether it's opening a file or directory, so we need to check both
 		if (dir is not null)
@@ -418,7 +417,7 @@ public class OsuVFS : FileSystemBase
 
 		this._logger.LogTrace("Closed: {FileDesc}", FileDesc);
 
-		using ScopedSemaphoreSlim.Scope _ = this.RootDirectoryLock.Enter();
+		using ResourceAccessor<VirtualDirectory>.AccessorScope accessor = this.RootDirectory.EnterAccessorScope();
 
 		if (this.Option.ReadOnly)
 			goto Dispose;
@@ -432,13 +431,13 @@ public class OsuVFS : FileSystemBase
 			{
 				// let osu cleanup the file
 				// file.PhysicalFile.Delete();
-				this.RootDirectory.RemoveFile(path);
+				accessor.Value.RemoveFile(path);
 			}
 			else if (vObj is VirtualDirectory)
 			{
-				this.RootDirectory.RemoveDirectory(path);
+				accessor.Value.RemoveDirectory(path);
 			}
-			this.UpdateRealm(this.RootDirectory.FindDirectory(path.GetDirectoryRange(..2)).ThrowIfNull());
+			this.UpdateRealm(accessor.Value.FindDirectory(path.GetDirectoryRange(..2)).ThrowIfNull(), accessor.Value);
 
 			this._logger.LogDebug("{type} removed", vObj.GetType().Name);
 
@@ -465,11 +464,11 @@ public class OsuVFS : FileSystemBase
 			fileDesc.File.OriginalHash = hashString;
 
 		Update:
-			this.UpdateRealm(fileDesc.File);
+			this.UpdateRealm(fileDesc.File, accessor.Value);
 		}
 		else if (descriptor is DirectoryDescriptor dirDesc && dirDesc.Directory.HasBeenRenamed)
 		{
-			this.UpdateRealm(dirDesc.Directory);
+			this.UpdateRealm(dirDesc.Directory, accessor.Value);
 		}
 
 	Dispose:
@@ -601,10 +600,10 @@ public class OsuVFS : FileSystemBase
 	{
 		this._logger.LogTrace("GetSecurityByName: {name}", FileName);
 
-		using ScopedSemaphoreSlim.Scope _ = this.RootDirectoryLock.Enter();
+		using ResourceAccessor<VirtualDirectory>.AccessorScope accessor = this.RootDirectory.EnterAccessorScope();
 
-		VirtualDirectory? dir = this.RootDirectory.FindDirectory(VirtualPath.FromDirectory(FileName), StringComparison.OrdinalIgnoreCase);
-		VirtualFile? file = this.RootDirectory.FindFile(VirtualPath.FromFile(FileName), StringComparison.OrdinalIgnoreCase);
+		VirtualDirectory? dir = accessor.Value.FindDirectory(VirtualPath.FromDirectory(FileName), StringComparison.OrdinalIgnoreCase);
+		VirtualFile? file = accessor.Value.FindFile(VirtualPath.FromFile(FileName), StringComparison.OrdinalIgnoreCase);
 
 		if (file is not null)
 		{
@@ -768,7 +767,7 @@ public class OsuVFS : FileSystemBase
 			return STATUS_NOT_SUPPORTED;
 		}
 
-		using ScopedSemaphoreSlim.Scope _ = this.RootDirectoryLock.Enter();
+		using ResourceAccessor<VirtualDirectory>.AccessorScope accessor = this.RootDirectory.EnterAccessorScope();
 
 		// note ignoring file attributes, granted access, create options, security descriptor etc for now, will implement later if needed
 		if (FileAttributes.HasFlag((uint)FileAttributes_t.Directory))
@@ -777,7 +776,7 @@ public class OsuVFS : FileSystemBase
 			// doesnt need to check directory segment length, is valid write operation already done that
 			VirtualPath parentPath = fullPath.GetDirectoryRange(..^1);
 
-			VirtualDirectory? parent = this.RootDirectory.FindDirectory(parentPath, StringComparison.OrdinalIgnoreCase);
+			VirtualDirectory? parent = accessor.Value.FindDirectory(parentPath, StringComparison.OrdinalIgnoreCase);
 
 			if (parent is null)
 			{
@@ -808,7 +807,7 @@ public class OsuVFS : FileSystemBase
 		else
 		{
 			VirtualPath path = VirtualPath.FromFile(FileName);
-			VirtualDirectory? parent = this.RootDirectory.FindDirectory(path);
+			VirtualDirectory? parent = accessor.Value.FindDirectory(path);
 
 			if (parent is null)
 			{
@@ -857,7 +856,7 @@ public class OsuVFS : FileSystemBase
 			return STATUS_NOT_SUPPORTED;
 		}
 
-		using ScopedSemaphoreSlim.Scope _2 = this.RootDirectoryLock.Enter();
+		using ResourceAccessor<VirtualDirectory>.AccessorScope accessor = this.RootDirectory.EnterAccessorScope();
 
 		if (FileDesc is DirectoryDescriptor dirNode)
 		{
@@ -866,9 +865,9 @@ public class OsuVFS : FileSystemBase
 			VirtualPath oldDirPath = VirtualPath.FromDirectory(FileName);
 			VirtualPath newDirPath = VirtualPath.FromDirectory(NewFileName);
 
-			VirtualDirectory? newTarget = this.RootDirectory.FindDirectory(newDirPath, StringComparison.OrdinalIgnoreCase);
-			VirtualDirectory? newParent = this.RootDirectory.FindDirectory(newDirPath.GetDirectoryRange(..^1), StringComparison.OrdinalIgnoreCase);
-			VirtualDirectory? oldTarget = this.RootDirectory.FindDirectory(oldDirPath, StringComparison.OrdinalIgnoreCase);
+			VirtualDirectory? newTarget = accessor.Value.FindDirectory(newDirPath, StringComparison.OrdinalIgnoreCase);
+			VirtualDirectory? newParent = accessor.Value.FindDirectory(newDirPath.GetDirectoryRange(..^1), StringComparison.OrdinalIgnoreCase);
+			VirtualDirectory? oldTarget = accessor.Value.FindDirectory(oldDirPath, StringComparison.OrdinalIgnoreCase);
 			VirtualDirectory? oldParent = oldTarget?.Parent;
 
 			if (newTarget is not null)
@@ -893,7 +892,7 @@ public class OsuVFS : FileSystemBase
 			}
 
 			VirtualDirectory oldDir = dirNode.Directory;
-			this.RootDirectory.RemoveDirectory(oldDir.GetFullPath());
+			accessor.Value.RemoveDirectory(oldDir.GetFullPath());
 			newParent.AddDirectory(oldDir);
 			oldDir.Name = newDirPath.DirectorySegments[^1];
 			oldDir.HasBeenRenamed = true;
@@ -907,8 +906,8 @@ public class OsuVFS : FileSystemBase
 			VirtualPath oldPath = node.File.GetFullPath();
 			VirtualPath newPath = VirtualPath.FromFile(NewFileName);
 
-			VirtualFile? newTarget = this.RootDirectory.FindFile(newPath, StringComparison.OrdinalIgnoreCase);
-			VirtualDirectory? newParent = this.RootDirectory.FindDirectory(newPath, StringComparison.OrdinalIgnoreCase);
+			VirtualFile? newTarget = accessor.Value.FindFile(newPath, StringComparison.OrdinalIgnoreCase);
+			VirtualDirectory? newParent = accessor.Value.FindDirectory(newPath, StringComparison.OrdinalIgnoreCase);
 			VirtualFile oldTarget = node.File;
 			VirtualDirectory? oldParent = node.File.Parent;
 
@@ -917,7 +916,7 @@ public class OsuVFS : FileSystemBase
 				this._logger.LogWarning("Failed to find parent directory for {FileName} during rename operation", FileName);
 				return STATUS_UNEXPECTED_IO_ERROR;
 			}
-			if (this.RootDirectory.FindFile(VirtualPath.FromFile(FileName), StringComparison.OrdinalIgnoreCase).ThrowIfNull().GetFullPath()
+			if (accessor.Value.FindFile(VirtualPath.FromFile(FileName), StringComparison.OrdinalIgnoreCase).ThrowIfNull().GetFullPath()
 				!= oldTarget.GetFullPath())
 			{
 				this._logger.LogWarning("File name {f} does match file desc path {d}", FileName, oldTarget.GetFullPath());
@@ -935,13 +934,13 @@ public class OsuVFS : FileSystemBase
 				{
 					return STATUS_OBJECT_NAME_COLLISION;
 				}
-				this.RootDirectory.RemoveFile(newTarget.GetFullPath());
+				accessor.Value.RemoveFile(newTarget.GetFullPath());
 			}
 
-			this.RootDirectory.RemoveFile(oldTarget.GetFullPath());
+			accessor.Value.RemoveFile(oldTarget.GetFullPath());
 
 			node.File = new(newPath.FileName, node.File.OriginalHash, node.File.PhysicalFile);
-			this.RootDirectory.AddFile(node.File, newParent.GetFullPath());
+			accessor.Value.AddFile(node.File, newParent.GetFullPath());
 			node.HasEverWritten = true;
 
 			return STATUS_SUCCESS;

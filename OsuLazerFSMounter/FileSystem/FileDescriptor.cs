@@ -1,4 +1,6 @@
-﻿namespace OsuLazerFSMounter.FileSystem;
+﻿using OsuLazerFSMounter.Utility;
+
+namespace OsuLazerFSMounter.FileSystem;
 
 public class FileDescriptor : IDescriptor
 {

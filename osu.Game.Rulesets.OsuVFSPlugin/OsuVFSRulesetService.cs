@@ -2,6 +2,7 @@
 using Microsoft.Extensions.Logging;
 using osu.Game.Database;
 using OsuLazerFSMounter;
+using OsuLazerFSMounter.Utility;
 
 namespace osu.Game.Rulesets.OsuVFSPlugin;
 public class OsuVFSRulesetService : Service

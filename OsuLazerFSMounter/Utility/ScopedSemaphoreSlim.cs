@@ -1,4 +1,4 @@
-﻿namespace OsuLazerFSMounter;
+﻿namespace OsuLazerFSMounter.Utility;
 
 public class ScopedSemaphoreSlim : IDisposable
 {

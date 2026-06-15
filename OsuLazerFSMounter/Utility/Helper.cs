@@ -1,6 +1,6 @@
 ﻿using System.Diagnostics.CodeAnalysis;
 
-namespace OsuLazerFSMounter;
+namespace OsuLazerFSMounter.Utility;
 public static class Helper
 {
 	public static bool HasFlag(this uint value, uint flag)
@@ -16,16 +16,8 @@ public static class Helper
 	public static T ThrowIfNull<T>(this T obj)
 	{
 		if (obj is null)
-		{
 			throw new ArgumentNullException(nameof(obj), "Object cannot be null.");
-		}
 		return obj;
-	}
-
-	public static bool IsDirectory(string path)
-	{
-		path = path.TrimEnd();
-		return path.EndsWith("/") || path.EndsWith("\\");
 	}
 
 	/// <summary>

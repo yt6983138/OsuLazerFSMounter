@@ -2,6 +2,7 @@
 using Microsoft.Extensions.Logging;
 using NLog.Extensions.Logging;
 using osu.Game.Database;
+using OsuLazerFSMounter.Utility;
 using System.CommandLine;
 
 namespace OsuLazerFSMounter;

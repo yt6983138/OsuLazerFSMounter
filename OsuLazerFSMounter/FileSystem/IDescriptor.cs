@@ -1,4 +1,6 @@
-﻿namespace OsuLazerFSMounter.FileSystem;
+﻿using OsuLazerFSMounter.Utility;
+
+namespace OsuLazerFSMounter.FileSystem;
 public interface IDescriptor : IDisposable
 {
 	ScopedSemaphoreSlim Lock { get; }
