@@ -135,7 +135,7 @@ public class OsuVFSConsoleService : Service
 
 		// SetVolumeLabel, Flush(Volume), Create, Cleanup(Delete), SetInformation(Rename) shares the same lock, so they are all atomic with each other
 		// Open, ReadDirectory, SetDisposition, GetVolumeInfo cannot run at the same time as the above operations, but they can run at the same time as each other
-		this._host.Mount(mountPoint, Synchronized: true);
+		this._host.Mount(mountPoint, Synchronized: false);
 
 		this._logger?.LogInformation("Mounting started.");
 	}

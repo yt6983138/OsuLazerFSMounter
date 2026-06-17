@@ -8,7 +8,11 @@ public class VirtualFile : IVirtualFileSystemObject
 	public VirtualDirectory? Parent { get; internal set; }
 
 	public string Name { get; set; }
-	public string OriginalHash { get; set; }
+	/// <summary>
+	/// this indicate the sha256 hash of the file content, it will be updated when Close is called.
+	/// Empty if the file is newly created and not yet closed, and original file hash after just loaded from database
+	/// </summary>
+	public string Hash { get; set; }
 	public FileInfo PhysicalFile
 	{
 		get => this.PhysicalFileLazy.Value;
@@ -21,7 +25,7 @@ public class VirtualFile : IVirtualFileSystemObject
 	public VirtualFile(string name, string hash, Lazy<FileInfo> physicalFile)
 	{
 		this.Name = name;
-		this.OriginalHash = hash;
+		this.Hash = hash;
 		this.PhysicalFileLazy = physicalFile;
 	}
 

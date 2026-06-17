@@ -37,6 +37,8 @@ public class OsuVFS : FileSystemBase
 		public ScopedSemaphoreSlim Lock { get; } = new(1, 1);
 	}
 
+	public delegate void RealmUpdateHandler(VirtualDirectory skinOrSongDirectory, OsuVFSBaseDirectoryType type);
+
 	private readonly ILogger<OsuVFS> _logger;
 	private readonly FrozenDictionary<string, DirectoryInfo> _cachedHashDirectories;
 	/// <summary>
@@ -47,10 +49,14 @@ public class OsuVFS : FileSystemBase
 	private readonly DirectoryInfo _tempFolder = Directory.CreateTempSubdirectory("osu_vfs_");
 
 	public ResourceAccessor<VirtualDirectory> RootDirectory { get; } = new(1, 1, new(""));
+	public ResourceAccessor<List<IDescriptor>> OpenDescriptors { get; } = new(1, 1, []);
 
 	public RealmAccess RealmAccess { get; private init; }
 	public DirectoryInfo FilesFolder { get; private init; }
 	public OsuVFSOption Option { get; private init; }
+
+	public event RealmUpdateHandler? RealmPreUpdate;
+	public event RealmUpdateHandler? RealmPostUpdate;
 
 	public OsuVFS(RealmAccess realm, DirectoryInfo hashFileStorage, ILogger<OsuVFS> logger, OsuVFSOption option)
 	{
@@ -107,16 +113,16 @@ public class OsuVFS : FileSystemBase
 
 	private FileInfo LazyFetchFileInfo(VirtualFile self)
 	{
-		FileInfo? physical = this._cachedHashDirectories[self.OriginalHash[0..2]]
-			.EnumerateFiles(self.OriginalHash)
-			.FirstOrDefault(x => x.Name == self.OriginalHash);
+		FileInfo? physical = this._cachedHashDirectories[self.Hash[0..2]]
+			.EnumerateFiles(self.Hash)
+			.FirstOrDefault(x => x.Name == self.Hash);
 
 		if (physical is null)
 		{
-			this._logger.LogWarning("Failed to find physical file for hash {hash}, creating an empty file as fallback", self.OriginalHash);
+			this._logger.LogWarning("Failed to find physical file for hash {hash}, creating an empty file as fallback", self.Hash);
 			physical = new(Path.Combine(this._tempFolder.FullName, Path.GetRandomFileName()));
 			physical.Create().Dispose();
-			self.OriginalHash = "";
+			self.Hash = "";
 		}
 
 		if (this.Option.ReadOnly)
@@ -125,16 +131,17 @@ public class OsuVFS : FileSystemBase
 			return physical;
 		}
 
-		if (this._reverseHashFileDictionary.TryGetValue(self.OriginalHash, out ReverseHashInfo? info))
+		if (this._reverseHashFileDictionary.TryGetValue(self.Hash, out ReverseHashInfo? info))
 		{
 			using ScopedSemaphoreSlim.Scope _ = info.Lock.Enter();
-			if (info.Files.Count <= 1 || !info.Files.Remove(self))
+			int maxFilesAllowed = this.Option.AllowDirectFileWriting ? 1 : 0;
+			if (info.Files.Count <= maxFilesAllowed || !info.Files.Remove(self))
 			{
 				// no more files with same hash pointing to the same physical file
 				return physical;
 			}
 
-			this._logger.LogDebug("Separating file hash {hash} to a new physical file, {count} same hash remains", self.OriginalHash, info.Files.Count - 1);
+			this._logger.LogDebug("Separating file hash {hash} to a new physical file, {count} same hash remains", self.Hash, info.Files.Count - 1);
 			FileInfo newFile = physical.CopyTo(Path.Combine(this._tempFolder.FullName, Path.GetRandomFileName()));
 
 			return newFile;
@@ -200,17 +207,22 @@ public class OsuVFS : FileSystemBase
 	/// <param name="directory"></param>
 	private void UpdateRealm(VirtualDirectory directory, OsuVFSBaseDirectoryType kind)
 	{
+		try
+		{
+			this.RealmPreUpdate?.Invoke(directory, kind);
+		}
+		catch (Exception ex)
+		{
+			this._logger.LogError(ex, "An error occurred in RealmPreUpdate, the update process will continue but may cause unexpected behavior");
+		}
+
 		int truncateCount = directory.GetFullPath().DirectorySegments.Length;
 		List<RealmFlattenedFileInfo> flattenedFiles = [];
 		FlattenDirectory(directory);
 
 		if (kind == OsuVFSBaseDirectoryType.Songs)
 		{
-			this.RealmAccess.Write(x =>
-			{
-				this._logger.LogDebug("Updating beatmap set {guid}", directory.Identifier);
-				UpdateCore(x.Find<BeatmapSetInfo>(directory.Identifier).ThrowIfNull(), x);
-			});
+			this.RealmAccess.Write(UpdateBeatmaps);
 		}
 		else if (kind == OsuVFSBaseDirectoryType.Skins)
 		{
@@ -225,13 +237,98 @@ public class OsuVFS : FileSystemBase
 			throw new ArgumentException("Invalid kind", nameof(kind));
 		}
 
+		try
+		{
+			this.RealmPostUpdate?.Invoke(directory, kind);
+		}
+		catch (Exception ex)
+		{
+			this._logger.LogError(ex, "An error occurred in RealmPostUpdate, the update process has completed but may cause unexpected behavior");
+		}
+
+		void UpdateBeatmaps(Realm realm)
+		{
+			this._logger.LogDebug("Updating beatmap set {guid}", directory.Identifier);
+			BeatmapSetInfo originalEntry = realm.Find<BeatmapSetInfo>(directory.Identifier).ThrowIfNull();
+
+			Dictionary<string, Guid> beatmapHashToGuid = originalEntry.Beatmaps.ToDictionary(y => y.Hash, y => y.ID);
+
+			foreach ((string? hash, Guid guid) in beatmapHashToGuid)
+			{
+				RealmNamedFileUsage[] files = originalEntry.Files.Where(x => x.File.Hash == hash).ToArray();
+				if (files.Length == 0)
+				{
+					this._logger.LogWarning("Beatmap {hash} has no corresponding file in the beatmap set {guid}", hash, directory.Identifier);
+					continue;
+				}
+				if (files.Length > 1)
+				{
+					this._logger.LogWarning("Beatmap {hash} has multiple corresponding files in the beatmap set {guid}, this may cause unexpected behavior", hash, directory.Identifier);
+				}
+
+				RealmNamedFileUsage realFile = files[0];
+				VirtualPath realFilePath = VirtualPath.FromFile(realFile.Filename);
+
+				RealmFlattenedFileInfo entry = flattenedFiles.FirstOrDefault(x => x.Path == realFilePath);
+				if (entry == default)
+				{
+					// could be renamed, try to find by hash
+					// since we enter root dir lock for both rename and close, a rename and a write-close cannot happen at the same time
+					// so if the file is not found, either the file is renamed or the hash is changed
+					// (or it was a orphaned beatmap)
+					this._logger.LogInformation("Beatmap file {hash} is not found in the flattened files of the beatmap set {guid}, trying to find by hash", hash, directory.Identifier);
+					RealmFlattenedFileInfo[] hashEntries = flattenedFiles.Where(x => x.File.Hash == hash).ToArray();
+					if (hashEntries.Length == 0)
+					{
+						this._logger.LogWarning("Beatmap file {hash} is not found in the flattened files of the beatmap set {guid} even by hash, skipping", hash, directory.Identifier);
+						continue;
+					}
+					if (hashEntries.Length > 1)
+					{
+						this._logger.LogWarning("Beatmap file {hash} has multiple corresponding files in the flattened files of the beatmap set {guid}, leaving the record unchanged", hash, directory.Identifier);
+						continue;
+					}
+
+					entry = hashEntries[0];
+				}
+
+				BeatmapInfo beatmap = realm.Find<BeatmapInfo>(guid).ThrowIfNull();
+				string oldMd5Hash = beatmap.MD5Hash;
+				string oldHash = beatmap.Hash;
+
+				if (oldHash == entry.File.Hash)
+				{
+					// skip md5 calculation
+					continue;
+				}
+
+				string md5Hash;
+				using (FileStream stream = entry.File.PhysicalFile.OpenRead())
+				{
+					md5Hash = Convert.ToHexString(MD5.HashData(stream)).ToLower();
+				}
+
+
+				beatmap.Hash = entry.File.Hash;
+				beatmap.MD5Hash = md5Hash;
+
+				beatmap.TransferCollectionReferences(realm, oldMd5Hash);
+			}
+
+			UpdateCore(originalEntry, realm);
+
+			// calculate entire beatmap set hash
+			// TODO: implement this
+
+		}
+
 		void UpdateCore(IHasRealmFiles originalEntry, Realm realm)
 		{
 			originalEntry.Files.Clear();
 			foreach (RealmFlattenedFileInfo file in flattenedFiles)
 			{
-				RealmFile rawFile = realm.Find<RealmFile>(file.File.OriginalHash)
-					?? realm.Add(new RealmFile() { Hash = file.File.OriginalHash });
+				RealmFile rawFile = realm.Find<RealmFile>(file.File.Hash)
+					?? realm.Add(new RealmFile() { Hash = file.File.Hash });
 				originalEntry.Files.Add(new(rawFile, file.Path.ToString("", null)));
 			}
 		}
@@ -360,6 +457,7 @@ public class OsuVFS : FileSystemBase
 			FileDesc = directoryDescriptor;
 			FileInfo = this.CreateInfo(dir);
 			SetNormalizedPath(dir.GetFullPath(), out NormalizedName);
+			this.OpenDescriptors.Access((ref x) => x.Add(directoryDescriptor));
 
 			this._logger.LogTrace("Open: Directory {name}", FileName);
 
@@ -383,6 +481,7 @@ public class OsuVFS : FileSystemBase
 		FileDesc = descriptor;
 		FileInfo = this.CreateInfo(file.PhysicalFile);
 		SetNormalizedPath(file.GetFullPath(), out NormalizedName);
+		this.OpenDescriptors.Access((ref x) => x.Add(descriptor));
 
 		return STATUS_SUCCESS;
 	}
@@ -450,7 +549,7 @@ public class OsuVFS : FileSystemBase
 			byte[] hash = SHA256.HashData(fileDesc.Stream);
 			string hashString = Convert.ToHexString(hash).ToLower();
 
-			if (fileDesc.File.OriginalHash == hashString) goto Dispose;
+			if (fileDesc.File.Hash == hashString) goto Dispose;
 
 			DirectoryInfo newHashDir = this._cachedHashDirectories[hashString[..2]];
 			FileInfo newFile = new(Path.Combine(newHashDir.FullName, hashString));
@@ -461,18 +560,20 @@ public class OsuVFS : FileSystemBase
 			fileDesc.Stream.Dispose();
 			fileDesc.File.PhysicalFile.CopyTo(newFile.FullName);
 			fileDesc.File.PhysicalFile = newFile;
-			fileDesc.File.OriginalHash = hashString;
+			fileDesc.File.Hash = hashString;
 
 		Update:
 			this.UpdateRealm(fileDesc.File, accessor.Value);
 		}
 		else if (descriptor is DirectoryDescriptor dirDesc && dirDesc.Directory.HasBeenRenamed)
 		{
+			dirDesc.Directory.HasBeenRenamed = false;
 			this.UpdateRealm(dirDesc.Directory, accessor.Value);
 		}
 
 	Dispose:
 		descriptor.Dispose();
+		this.OpenDescriptors.Access((ref x) => x.Remove(descriptor));
 	}
 	public override void Cleanup(object FileNode, object FileDesc, string FileName, uint Flags)
 	{
@@ -798,10 +899,13 @@ public class OsuVFS : FileSystemBase
 
 			VirtualDirectory dir = parent.AddDirectory(subDirPath);
 
+			DirectoryDescriptor directoryDescriptor = new(dir);
 			FileNode = null!;
-			FileDesc = new DirectoryDescriptor(dir);
+			FileDesc = directoryDescriptor;
 			FileInfo = this.CreateInfo(dir);
 			SetNormalizedPath(dir.GetFullPath(), out NormalizedName);
+			this.OpenDescriptors.Access((ref x) => x.Add(directoryDescriptor));
+
 			return STATUS_SUCCESS;
 		}
 		else
@@ -832,13 +936,16 @@ public class OsuVFS : FileSystemBase
 			VirtualFile file = new(filePath.FileName, "", physicalFile);
 			parent.AddFile(file, filePath);
 
-			FileNode = null!;
-			FileDesc = new FileDescriptor(file, this.OpenStreamDefault(physicalFile))
+			FileDescriptor fileDescriptor = new(file, this.OpenStreamDefault(physicalFile))
 			{
 				HasEverWritten = true // to make Close update realm
 			};
+			FileNode = null!;
+			FileDesc = fileDescriptor;
 			FileInfo = this.CreateInfo(physicalFile);
 			SetNormalizedPath(file.GetFullPath(), out NormalizedName);
+			this.OpenDescriptors.Access((ref x) => x.Add(fileDescriptor));
+
 			return STATUS_SUCCESS;
 		}
 	}
@@ -939,7 +1046,7 @@ public class OsuVFS : FileSystemBase
 
 			accessor.Value.RemoveFile(oldTarget.GetFullPath());
 
-			node.File = new(newPath.FileName, node.File.OriginalHash, node.File.PhysicalFile);
+			node.File = new(newPath.FileName, node.File.Hash, node.File.PhysicalFile);
 			accessor.Value.AddFile(node.File, newParent.GetFullPath());
 			node.HasEverWritten = true;
 
