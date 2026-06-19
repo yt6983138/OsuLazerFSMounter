@@ -1,4 +1,6 @@
-﻿using osu.Game.Beatmaps;
+﻿using osu.Framework.Input.Bindings;
+using osu.Framework.Logging;
+using osu.Game.Beatmaps;
 using osu.Game.Configuration;
 using osu.Game.Overlays.Settings;
 using osu.Game.Rulesets.Configuration;
@@ -8,17 +10,49 @@ using osu.Game.Rulesets.Objects;
 using osu.Game.Rulesets.OsuVFSPlugin.Dummy;
 using osu.Game.Rulesets.UI;
 using OsuLazerFSMounter;
+using System.Runtime.InteropServices;
 
 namespace osu.Game.Rulesets.OsuVFSPlugin;
 public partial class OsuVFSRuleset : Ruleset
 {
+	public bool IsSupported { get; } = true;
+
 	public override string Description => "OsuVFS as a ruleset plugin";
 	public override string ShortName => nameof(OsuVFS);
 
-	public override IRulesetConfigManager CreateConfig(SettingsStore? settings)
-	=> new OsuVFSRulesetConfigManager(settings, this.RulesetInfo);
-	public override RulesetSettingsSubsection CreateSettings()
-		=> new OsuVFSSettingsSubsection(this);
+	public OsuVFSRuleset()
+	{
+		if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+		{
+			this.IsSupported = false;
+			Logger.Log("OsuVFS is only supported on windows, settings will not be available.", level: LogLevel.Important);
+		}
+	}
+
+	public override IRulesetConfigManager? CreateConfig(SettingsStore? settings)
+	{
+		if (!this.IsSupported)
+			return null;
+
+		return new OsuVFSRulesetConfigManager(settings, this.RulesetInfo);
+	}
+	public override RulesetSettingsSubsection? CreateSettings()
+	{
+		if (!this.IsSupported)
+			return null;
+
+		return new OsuVFSSettingsSubsection(this);
+	}
+
+	public override IEnumerable<KeyBinding> GetDefaultKeyBindings(int variant = 0)
+	{
+		if (!this.IsSupported)
+			return [];
+
+		return [
+			new(keys: new(InputKey.Control, InputKey.Alt, InputKey.Shift, InputKey.S), OsuVFSKeyBind.ReloadSkin)
+		];
+	}
 
 	#region Required dummy implementations
 
