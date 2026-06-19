@@ -4,17 +4,30 @@ using osu.Framework.Graphics;
 using osu.Framework.Graphics.Containers;
 using osu.Framework.Localisation;
 using osu.Framework.Platform;
+using osu.Game.Beatmaps;
 using osu.Game.Database;
 using osu.Game.Graphics.UserInterfaceV2;
+using osu.Game.Input.Bindings;
 using osu.Game.Overlays.Settings;
+using osu.Game.Skinning;
 using OsuLazerFSMounter;
 using System.Runtime.CompilerServices;
 
 namespace osu.Game.Rulesets.OsuVFSPlugin;
 public partial class OsuVFSSettingsSubsection : RulesetSettingsSubsection
 {
+	private readonly Ruleset _ruleset;
+	private SettingsButtonV2 _unmountButton = null!;
+
 	[Resolved]
 	private RealmAccess RealmAccess { get; set; } = null!;
+	[Resolved]
+	private BeatmapManager BeatmapManager { get; set; } = null!;
+	[Resolved]
+	private SkinManager SkinManager { get; set; } = null!;
+	[Resolved]
+	private OsuGame Game { get; set; } = null!;
+
 	private DirectoryInfo FileDirectory
 	{
 		get
@@ -27,7 +40,8 @@ public partial class OsuVFSSettingsSubsection : RulesetSettingsSubsection
 			static extern ref Storage GetStorage(RealmAccess realmAccess);
 		}
 	}
-	public OsuVFSRulesetService RulesetService => OsuVFSRulesetService.GetOrCreateInstance(this.RealmAccess, this.FileDirectory);
+	public OsuVFSRulesetService RulesetService
+		=> OsuVFSRulesetService.GetOrCreateInstance(this.RealmAccess, this.FileDirectory, this.BeatmapManager, this.SkinManager);
 	private ILogger<OsuVFSSettingsSubsection> Logger
 	{
 		get
@@ -41,8 +55,21 @@ public partial class OsuVFSSettingsSubsection : RulesetSettingsSubsection
 
 	public OsuVFSSettingsSubsection(Ruleset ruleset) : base(ruleset)
 	{
+		this._ruleset = ruleset;
 	}
 
+	protected override void LoadComplete()
+	{
+		base.LoadComplete();
+		this._unmountButton.Enabled.Value = false;
+
+		// maybe i should find somewhere else to register components? since this will only be loaded when the user opens the settings menu
+		DatabasedKeyBindingContainer<OsuVFSKeyBind> container = new(this._ruleset.RulesetInfo, 0)
+		{
+			new OsuVFSKeyBindHandler(this.SkinManager, this.RealmAccess)
+		};
+		this.Game.Add(container);
+	}
 #pragma warning disable IDE1006 // Naming Styles
 	[BackgroundDependencyLoader]
 	private void load()
@@ -56,13 +83,13 @@ public partial class OsuVFSSettingsSubsection : RulesetSettingsSubsection
 			RelativeSizeAxes = Axes.X,
 			Text = "Mount"
 		};
-		SettingsButtonV2 unmountButton = new()
+		this._unmountButton = new()
 		{
 			Width = 0.5f,
 			RelativeSizeAxes = Axes.X,
 			Text = "Unmount",
-			Enabled = { Value = false }
 		};
+
 		mountButton.Action = () =>
 		{
 			mountButton.Enabled.Value = false;
@@ -72,7 +99,7 @@ public partial class OsuVFSSettingsSubsection : RulesetSettingsSubsection
 			try
 			{
 				this.RulesetService.Mount();
-				unmountButton.Enabled.Value = true;
+				this._unmountButton.Enabled.Value = true;
 			}
 			catch (Exception ex)
 			{
@@ -81,9 +108,9 @@ public partial class OsuVFSSettingsSubsection : RulesetSettingsSubsection
 				mountButton.Enabled.Value = true;
 			}
 		};
-		unmountButton.Action = () =>
+		this._unmountButton.Action = () =>
 		{
-			unmountButton.Enabled.Value = false;
+			this._unmountButton.Enabled.Value = false;
 			try
 			{
 				this.RulesetService.Unmount();
@@ -92,7 +119,7 @@ public partial class OsuVFSSettingsSubsection : RulesetSettingsSubsection
 			catch (Exception ex)
 			{
 				this.Logger.LogError(ex, "Failed to unmount VFS.");
-				unmountButton.Enabled.Value = true;
+				this._unmountButton.Enabled.Value = true;
 			}
 		};
 
@@ -116,7 +143,7 @@ public partial class OsuVFSSettingsSubsection : RulesetSettingsSubsection
 				Children =
 				[
 					mountButton,
-					unmountButton
+					this._unmountButton
 				]
 			},
 		];
