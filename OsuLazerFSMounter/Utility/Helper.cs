@@ -1,4 +1,6 @@
-﻿using System.Diagnostics.CodeAnalysis;
+﻿using System.Buffers;
+using System.Diagnostics.CodeAnalysis;
+using System.Security.Cryptography;
 
 namespace OsuLazerFSMounter.Utility;
 public static class Helper
@@ -52,5 +54,22 @@ public static class Helper
 		availableLetters.RemoveAll(c => usedLetters.Contains(c));
 
 		return availableLetters;
+	}
+	public static void AppendStream(this IncrementalHash self, Stream stream, int bufferSize = 8192)
+	{
+		byte[] buffer = ArrayPool<byte>.Shared.Rent(bufferSize);
+
+		try
+		{
+			int bytesRead;
+			while ((bytesRead = stream.Read(buffer, 0, buffer.Length)) > 0)
+			{
+				self.AppendData(buffer, 0, bytesRead);
+			}
+		}
+		finally
+		{
+			ArrayPool<byte>.Shared.Return(buffer);
+		}
 	}
 }

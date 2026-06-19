@@ -44,6 +44,7 @@ public class OsuVFS : FileSystemBase
 	/// <summary>
 	/// this is only for storing files that have the same hash, so they will point to the same physical file, 
 	/// this dictionary may be modified and kinda works as a temporary database, so it will not hold all files
+	/// (primarily for lazy file info lookup)
 	/// </summary>
 	private readonly ConcurrentDictionary<string, ReverseHashInfo> _reverseHashFileDictionary = new();
 	private readonly DirectoryInfo _tempFolder = Directory.CreateTempSubdirectory("osu_vfs_");
@@ -141,7 +142,7 @@ public class OsuVFS : FileSystemBase
 				return physical;
 			}
 
-			this._logger.LogDebug("Separating file hash {hash} to a new physical file, {count} same hash remains", self.Hash, info.Files.Count - 1);
+			this._logger.LogDebug("Separating file hash {hash} to a new physical file, {count} same hash remains", self.Hash, info.Files.Count);
 			FileInfo newFile = physical.CopyTo(Path.Combine(this._tempFolder.FullName, Path.GetRandomFileName()));
 
 			return newFile;
@@ -197,6 +198,7 @@ public class OsuVFS : FileSystemBase
 	/// <inheritdoc cref="UpdateRealm(VirtualDirectory, OsuVFSBaseDirectoryType)"/>
 	private void UpdateRealm(IVirtualFileSystemObject child, VirtualDirectory rootDirectory)
 	{
+		// maybe i should introduce single file update method later as that would be way faster than doing things on all files to update a realm entry
 		VirtualPath path = child.GetFullPath();
 		OsuVFSBaseDirectoryType kind = Enum.Parse<OsuVFSBaseDirectoryType>(path.DirectorySegments[0], true);
 		this.UpdateRealm(rootDirectory.FindDirectory(path.GetDirectoryRange(0..2)).ThrowIfNull(), kind);
@@ -229,7 +231,7 @@ public class OsuVFS : FileSystemBase
 			this.RealmAccess.Write(x =>
 			{
 				this._logger.LogDebug("Updating skin {guid}", directory.Identifier);
-				UpdateCore(x.Find<SkinInfo>(directory.Identifier).ThrowIfNull(), x);
+				UpdateFiles(x.Find<SkinInfo>(directory.Identifier).ThrowIfNull(), x);
 			});
 		}
 		else
@@ -252,7 +254,6 @@ public class OsuVFS : FileSystemBase
 			BeatmapSetInfo originalEntry = realm.Find<BeatmapSetInfo>(directory.Identifier).ThrowIfNull();
 
 			Dictionary<string, Guid> beatmapHashToGuid = originalEntry.Beatmaps.ToDictionary(y => y.Hash, y => y.ID);
-
 			foreach ((string? hash, Guid guid) in beatmapHashToGuid)
 			{
 				RealmNamedFileUsage[] files = originalEntry.Files.Where(x => x.File.Hash == hash).ToArray();
@@ -315,14 +316,25 @@ public class OsuVFS : FileSystemBase
 				beatmap.TransferCollectionReferences(realm, oldMd5Hash);
 			}
 
-			UpdateCore(originalEntry, realm);
+			UpdateFiles(originalEntry, realm);
 
 			// calculate entire beatmap set hash
-			// TODO: implement this
+			using IncrementalHash hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+			foreach (RealmFlattenedFileInfo item in flattenedFiles)
+			{
+				// currently they only calculate the hash of .osu files
+				// osu.Game/Database/RealmArchiveModelImporter.cs line 505
+				// osu.Game/Beatmaps/BeatmapImporter.cs line 35
+				if (!item.Path.FileName.EndsWith(".osu", StringComparison.OrdinalIgnoreCase)) continue;
 
+				using FileStream stream = item.File.PhysicalFile.OpenRead();
+				hasher.AppendStream(stream);
+			}
+			byte[] hashBytes = hasher.GetHashAndReset();
+			originalEntry.Hash = Convert.ToHexString(hashBytes).ToLower();
 		}
 
-		void UpdateCore(IHasRealmFiles originalEntry, Realm realm)
+		void UpdateFiles(IHasRealmFiles originalEntry, Realm realm)
 		{
 			originalEntry.Files.Clear();
 			foreach (RealmFlattenedFileInfo file in flattenedFiles)
@@ -409,8 +421,24 @@ public class OsuVFS : FileSystemBase
 	}
 	public override void Unmounted(object Host)
 	{
+		using ResourceAccessor<List<IDescriptor>>.AccessorScope handleAccessor = this.OpenDescriptors.EnterAccessorScope();
 		using ResourceAccessor<VirtualDirectory>.AccessorScope accessor = this.RootDirectory.EnterAccessorScope();
+
+		HashSet<VirtualDirectory> beatmapsToUpdate = [];
+		HashSet<VirtualDirectory> skinsToUpdate = [];
+		foreach (IDescriptor item in handleAccessor.Value)
+		{
+			if (item is FileDescriptor fileDesc && !fileDesc.HasEverWritten)
+				continue;
+			else if (item is DirectoryDescriptor dirDesc && !dirDesc.Directory.HasBeenRenamed)
+				continue;
+
+			this.UpdateRealm(item.VirtualObject, accessor.Value);
+		}
+
 		accessor.Value.RemoveAll();
+		handleAccessor.Value.Clear();
+
 		this._logger.LogInformation("OsuVFS unmounted, host: {Host}", Host);
 	}
 	public override int Open(string FileName, uint CreateOptions, uint GrantedAccess, out object FileNode, out object FileDesc, out FSPFileInfo FileInfo, out string NormalizedName)
@@ -567,6 +595,8 @@ public class OsuVFS : FileSystemBase
 		}
 		else if (descriptor is DirectoryDescriptor dirDesc && dirDesc.Directory.HasBeenRenamed)
 		{
+			// idk why i put the flag in VirtualDirectory instead of the descriptor
+			// prob want to refactor this later since it didn't match other pattern and caused some bug when i initially forgot to set it to false after update
 			dirDesc.Directory.HasBeenRenamed = false;
 			this.UpdateRealm(dirDesc.Directory, accessor.Value);
 		}
