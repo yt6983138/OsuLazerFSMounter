@@ -39,7 +39,7 @@ public class ResourceAccessor<T> : IDisposable
 		}
 	}
 
-	public delegate void Accessor(ref T resource);
+	public delegate void Accessor(scoped ref T resource);
 	public delegate Task<T> AsyncAccessor(T resource);
 
 	private readonly ScopedSemaphoreSlim _semaphore;
