@@ -2,12 +2,10 @@
 
 namespace OsuLazerFSMounter.FileSystem;
 
+public record struct FlattenedFile(VirtualFile File, VirtualPath Path);
 [DebuggerDisplay("Dir {Name}, {Files.Count} files, {Subdirectories.Count} sub-dirs")]
 public class VirtualDirectory : IVirtualFileSystemObject
 {
-	private readonly List<VirtualDirectory> _subdirectories = [];
-	private readonly List<VirtualFile> _files = [];
-
 	public VirtualDirectory? Parent { get; internal set; }
 
 	/// <summary>
@@ -16,8 +14,8 @@ public class VirtualDirectory : IVirtualFileSystemObject
 	public Guid Identifier { get; set; }
 	public string Name { get; set; }
 	public bool HasBeenRenamed { get; set; } = false;
-	public IReadOnlyList<VirtualDirectory> Subdirectories => this._subdirectories;
-	public IReadOnlyList<VirtualFile> Files => this._files;
+	public List<VirtualDirectory> Subdirectories { get; } = [];
+	public List<VirtualFile> Files { get; } = [];
 
 	public bool IsEmpty => this.Subdirectories.Count == 0 && this.Files.Count == 0;
 
@@ -96,16 +94,16 @@ public class VirtualDirectory : IVirtualFileSystemObject
 
 	public void RemoveAllFiles()
 	{
-		this._files.Clear();
+		this.Files.Clear();
 	}
 	public void RemoveAllDirectories()
 	{
-		this._subdirectories.Clear();
+		this.Subdirectories.Clear();
 	}
 	public void RemoveAll()
 	{
-		this._files.Clear();
-		this._subdirectories.Clear();
+		this.Files.Clear();
+		this.Subdirectories.Clear();
 	}
 
 	public bool RemoveFile(VirtualPath path, StringComparison comparer = StringComparison.Ordinal)
@@ -120,8 +118,8 @@ public class VirtualDirectory : IVirtualFileSystemObject
 	{
 		if (index == paths.Length - 1)
 		{
-			bool hasAny = this._files.Any(f => f.Name.Equals(paths[index], comparer));
-			this._files.RemoveAll(f => f.Name.Equals(paths[index], comparer));
+			bool hasAny = this.Files.Any(f => f.Name.Equals(paths[index], comparer));
+			this.Files.RemoveAll(f => f.Name.Equals(paths[index], comparer));
 			return hasAny;
 		}
 		else
@@ -145,8 +143,8 @@ public class VirtualDirectory : IVirtualFileSystemObject
 		string current = paths[index];
 		if (index == paths.Length - 1)
 		{
-			bool hasAny = this._subdirectories.Any(d => d.Name.Equals(current, comparer));
-			this._subdirectories.RemoveAll(d => d.Name.Equals(current, comparer));
+			bool hasAny = this.Subdirectories.Any(d => d.Name.Equals(current, comparer));
+			this.Subdirectories.RemoveAll(d => d.Name.Equals(current, comparer));
 			return hasAny;
 		}
 		else
@@ -168,7 +166,7 @@ public class VirtualDirectory : IVirtualFileSystemObject
 		VirtualPath pathOrEmpty = path ?? new("");
 		if (pathOrEmpty.DirectorySegments.Length == 0)
 		{
-			this._files.Add(file);
+			this.Files.Add(file);
 			file.Parent = this;
 			return;
 		}
@@ -179,7 +177,7 @@ public class VirtualDirectory : IVirtualFileSystemObject
 	{
 		if (index == paths.Length)
 		{
-			this._files.Add(file);
+			this.Files.Add(file);
 			file.Parent = this;
 			return file;
 		}
@@ -193,7 +191,7 @@ public class VirtualDirectory : IVirtualFileSystemObject
 				{
 					Parent = this
 				};
-				this._subdirectories.Add(subdir);
+				this.Subdirectories.Add(subdir);
 			}
 			return subdir.AddInternal(paths, index + 1, file);
 		}
@@ -213,7 +211,7 @@ public class VirtualDirectory : IVirtualFileSystemObject
 		if (pathOrEmpty.DirectorySegments.Length == 0)
 		{
 			dir.Parent = this;
-			this._subdirectories.Add(dir);
+			this.Subdirectories.Add(dir);
 			return;
 		}
 		this.AddDirectoryInternal(pathOrEmpty.DirectorySegments, dir, 0);
@@ -234,7 +232,7 @@ public class VirtualDirectory : IVirtualFileSystemObject
 				return existing;
 
 			dir.Parent = this;
-			this._subdirectories.Add(dir);
+			this.Subdirectories.Add(dir);
 			return dir;
 		}
 		else
@@ -248,9 +246,27 @@ public class VirtualDirectory : IVirtualFileSystemObject
 					Parent = this
 				};
 
-				this._subdirectories.Add(subdir);
+				this.Subdirectories.Add(subdir);
 			}
 			return subdir.AddDirectoryInternal(paths, dir, index + 1);
+		}
+	}
+
+	public List<FlattenedFile> FlattenFiles(bool useRelativePath)
+	{
+		List<FlattenedFile> files = [];
+		this.FlattenDirectoryInternal(files, this, useRelativePath ? this.GetFullPath().DirectorySegments.Length : 0);
+		return files;
+	}
+	private void FlattenDirectoryInternal(List<FlattenedFile> files, VirtualDirectory dir, int truncateCount)
+	{
+		foreach (VirtualFile file in dir.Files)
+		{
+			files.Add(new(file, file.GetFullPath().Mutate(x => x[truncateCount..])));
+		}
+		foreach (VirtualDirectory subdir in dir.Subdirectories)
+		{
+			this.FlattenDirectoryInternal(files, subdir, truncateCount);
 		}
 	}
 }
