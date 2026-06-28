@@ -1,4 +1,5 @@
-﻿using System.Buffers;
+﻿using osu.Game.Models;
+using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
 using System.Security.Cryptography;
 
@@ -28,7 +29,7 @@ public static class Helper
 	/// <param name="a"></param>
 	/// <param name="b"></param>
 	/// <returns></returns>
-	public static bool HasPrefixOf(this string[] a, string[] b)
+	public static bool HasPrefixOf(this ReadOnlySpan<string> a, ReadOnlySpan<string> b)
 	{
 		if (a.Length < b.Length)
 			return false;
@@ -71,5 +72,54 @@ public static class Helper
 		{
 			ArrayPool<byte>.Shared.Return(buffer);
 		}
+	}
+	public static string SanitizeFileName(string name)
+	{
+		if (name == "." || name == "..")
+			return $"_{name}";
+
+		string illegalChars = "\"*/:<>?\\|\0";
+
+		char[] newName = name.ToArray();
+		foreach (char item in illegalChars)
+		{
+			newName.Replace(item, '_');
+		}
+		for (int i = 0; i < newName.Length; i++)
+		{
+			if (char.IsControl(newName[i])) newName[i] = '_';
+		}
+
+		return new(newName);
+	}
+	public static IEnumerable<RealmFileInfo> ToRealmInfos(this IEnumerable<RealmNamedFileUsage> usages)
+	{
+		return usages.Select(x => new RealmFileInfo(x));
+	}
+	/// <summary>
+	/// additions and removals are relative to first sequence
+	/// </summary>
+	/// <typeparam name="T"></typeparam>
+	/// <typeparam name="TOrderKey"></typeparam>
+	/// <param name="first"></param>
+	/// <param name="second"></param>
+	/// <param name="keySelector"></param>
+	/// <param name="additions"></param>
+	/// <param name="removals"></param>
+	/// <returns></returns>
+	public static bool UnorderedSequenceEqual<T, TOrderKey>(
+		this IEnumerable<T> first,
+		IEnumerable<T> second,
+		Func<T, TOrderKey> keySelector,
+		out IEnumerable<T>? additions,
+		out IEnumerable<T>? removals)
+	{
+		T[] orderedFirst = first.OrderBy(keySelector).ToArray();
+		T[] orderedSecond = second.OrderBy(keySelector).ToArray();
+
+		bool equals = orderedFirst.SequenceEqual(orderedSecond);
+		additions = orderedSecond.Except(orderedFirst, EqualityComparer<T>.Default);
+		removals = orderedFirst.Except(orderedSecond, EqualityComparer<T>.Default);
+		return equals;
 	}
 }
