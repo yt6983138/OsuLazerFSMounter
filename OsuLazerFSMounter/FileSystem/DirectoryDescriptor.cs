@@ -4,6 +4,7 @@ namespace OsuLazerFSMounter.FileSystem;
 
 public class DirectoryDescriptor : IDescriptor
 {
+	public bool Invalidated { get; private set; }
 	public VirtualDirectory Directory { get; set; }
 	public ScopedSemaphoreSlim Lock { get; } = new(1, 1);
 	public bool DeleteOnClose { get; set; }
@@ -15,6 +16,10 @@ public class DirectoryDescriptor : IDescriptor
 		this.Directory = directory;
 	}
 
+	public void Invalidate()
+	{
+		this.Invalidated = true;
+	}
 	public void Dispose()
 	{
 		this.Lock.Dispose();
