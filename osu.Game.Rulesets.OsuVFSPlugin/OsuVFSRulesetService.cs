@@ -6,10 +6,13 @@ using osu.Game.Skinning;
 using OsuLazerFSMounter;
 using OsuLazerFSMounter.FileSystem;
 using OsuLazerFSMounter.Utility;
+using Realms;
 
 namespace osu.Game.Rulesets.OsuVFSPlugin;
 public class OsuVFSRulesetService : Service
 {
+	private record class MountedContext(OsuVFS VFS, FileSystemHost Host);
+
 	private static OsuVFSRulesetService? _instance;
 
 	public static OsuVFSRulesetService GetOrCreateInstance(
@@ -39,20 +42,24 @@ public class OsuVFSRulesetService : Service
 	private readonly BeatmapManager _beatmapManager;
 	private readonly SkinManager _skinManager;
 
-	// maybe i should put them in a context-like class so i don't have to deal with nullability every time
-	private OsuVFS? _osuVFS;
-	private FileSystemHost? _host;
+	private readonly IDisposable _beatmapSubscription;
+	private readonly IDisposable _skinSubscription;
 
-	private volatile int _hasMounted = 0;
+	private readonly ResourceAccessor<KeyedCollectionProxy<Guid, PartialBeatmapSetInfo>> _beatmapSetInfoCache = new(1, 1, new(x => x.ID));
+	private readonly ResourceAccessor<KeyedCollectionProxy<Guid, PartialSkinInfo>> _skinInfoCache = new(1, 1, new(x => x.ID));
+
+	private readonly ResourceAccessor<MountedContext?> _mountedContext = new(1, 1, null);
 
 	public ILoggerFactory LoggerFactory { get; private init; }
-	public bool HasMounted => this._hasMounted != 0;
 	public OsuVFSStartOption Options
 	{
 		get => field;
 		set
 		{
-			if (this._hasMounted != 0)
+			bool isMounted = false;
+			this._mountedContext.Access((ref MountedContext? x) => isMounted = x is not null);
+
+			if (isMounted)
 				throw new InvalidOperationException("Cannot set options after the filesystem has mounted.");
 
 			field = value;
@@ -65,22 +72,216 @@ public class OsuVFSRulesetService : Service
 		BeatmapManager beatmapManager,
 		SkinManager skinManager) : base(nameof(OsuVFSRuleset))
 	{
+		this.LoggerFactory = Microsoft.Extensions.Logging.LoggerFactory.Create(x => x
+			.AddProvider(new OsuLoggerProvider())
+			.SetMinimumLevel(
+#if DEBUG
+				LogLevel.Debug
+#else
+				LogLevel.Information
+#endif
+			));
+
 		this._realmAccess = realmAccess;
 		this._fileDirectory = fileDirectory;
-		this.LoggerFactory = Microsoft.Extensions.Logging.LoggerFactory.Create(x => x.AddProvider(new OsuLoggerProvider()));
 		this._logger = this.LoggerFactory.CreateLogger<OsuVFSRulesetService>();
 		this._beatmapManager = beatmapManager;
 		this._skinManager = skinManager;
+
+		this._beatmapSubscription = this._realmAccess.RegisterForNotifications(x => x.All<BeatmapSetInfo>(), this.RealmAccess_BeatmapSetInfoChanged);
+		this._skinSubscription = this._realmAccess.RegisterForNotifications(x => x.All<SkinInfo>(), this.RealmAccess_SkinInfoChanged);
+	}
+
+	// this method is kinda going insane
+	private void UpdateVFSFromExternalChange<TModel, TLocalModel>(
+		IRealmCollection<TModel> sender,
+		ChangeSet? changes,
+		ResourceAccessor<KeyedCollectionProxy<Guid, TLocalModel>>.AccessorScope accessor,
+		OsuVFSBaseDirectoryType baseType,
+		Func<TModel, TLocalModel> localConverter,
+		Func<OsuVFS, TModel, VirtualDirectory> addEntireConverter)
+
+		where TLocalModel : IOfflineRealmInfo
+		where TModel : IHasRealmFiles, IHasGuidPrimaryKey
+	{
+		string typeName = typeof(TModel).Name;
+
+		if (changes is null)
+		{
+			this._logger.LogDebug("Initial notification received for {type} collection.", typeName);
+			foreach (TModel item in sender)
+			{
+				accessor.Value.Add(localConverter.Invoke(item));
+			}
+			return;
+		}
+
+		TModel[] addedItems =
+			changes.InsertedIndices.Select(index => sender.ElementAt(index)).ToArray();
+		(TModel, TLocalModel, int)[] modifiedItems =
+			changes.ModifiedIndices.Select(index => (sender.ElementAt(index), accessor.Value[index], index)).ToArray();
+		TLocalModel[] removedItems =
+			changes.DeletedIndices.Select(index => accessor.Value[index]).ToArray();
+
+		foreach (TModel item in addedItems)
+		{
+			accessor.Value.Add(localConverter.Invoke(item));
+		}
+		foreach ((TModel? newItem, TLocalModel? oldItem, int index) in modifiedItems)
+		{
+			accessor.Value[index] = localConverter.Invoke(newItem);
+		}
+		foreach (TLocalModel item in removedItems)
+		{
+			accessor.Value.Remove(item);
+		}
+
+		using ResourceAccessor<MountedContext?>.AccessorScope vfsAccessor = this._mountedContext.EnterAccessorScope();
+		if (vfsAccessor.Value is null)
+			return; // not mounted yet
+
+		using ResourceAccessor<VirtualDirectory>.AccessorScope rootDirectory = vfsAccessor.Value.VFS.RootDirectory.EnterAccessorScope();
+
+		VirtualDirectory beatmapDirectory = rootDirectory.Value.FindDirectory(VirtualPath.FromDirectory(baseType.ToString()))
+			.ThrowIfNull();
+
+		foreach (TModel item in addedItems)
+		{
+			this._logger.LogDebug("External {type} addition: {guid}", typeName, item.ID);
+
+			beatmapDirectory.AddDirectory(
+				addEntireConverter.Invoke(vfsAccessor.Value.VFS, item));
+		}
+
+		using ResourceAccessor<List<IDescriptor>>.AccessorScope descriptorAccessor = vfsAccessor.Value.VFS.OpenDescriptors.EnterAccessorScope();
+		foreach (TLocalModel item in removedItems)
+		{
+			VirtualDirectory? dir = beatmapDirectory.Subdirectories.FirstOrDefault(x => x.Identifier == item.ID);
+			if (dir is null)
+			{
+				this._logger.LogWarning("Could not find directory for removed {type} with ID {id}.", typeName, item.ID);
+				continue;
+			}
+
+			VirtualPath directoryPath = dir.GetFullPath();
+
+			this._logger.LogDebug("External directory removal: {path}", directoryPath);
+
+			beatmapDirectory.Subdirectories.Remove(dir);
+
+			foreach (IDescriptor descriptor in descriptorAccessor.Value)
+			{
+				if (descriptor.VirtualObject.GetFullPath().DirectorySegments.HasPrefixOf(directoryPath.DirectorySegments))
+					descriptor.Invalidate();
+			}
+		}
+		foreach ((TModel? newItem, TLocalModel? oldItem, int index) in modifiedItems)
+		{
+			TLocalModel newInfo = localConverter.Invoke(newItem);
+
+			VirtualDirectory? dir = beatmapDirectory.Subdirectories.FirstOrDefault(x => x.Identifier == newInfo.ID);
+			if (dir is null)
+			{
+				this._logger.LogWarning("Could not find directory for modified {type} with ID {id}.", typeName, newInfo.ID);
+				continue;
+			}
+
+			// we can't just compare the new and old info for *changed* files, because the new info may be added from the vfs itself,
+			// so we need to compare each file instead. if any file is different, we need to invalidate the descriptor
+			// however, we can still check if the new and old info are equal, because if they are, we don't need to do anything
+
+			if (newInfo.Files.UnorderedSequenceEqual(oldItem.Files, x => x.GetHashCode(), out _, out _))
+				goto CheckNameOnly;
+
+			VirtualPath dirPath = dir.GetFullPath();
+			foreach (RealmFileInfo file in newInfo.Files)
+			{
+				VirtualPath oldPath = VirtualPath.FromFile(file.Path);
+				VirtualFile? oldFile = dir.FindFile(oldPath);
+				if (oldFile is null)
+				{
+					// add file
+					this._logger.LogDebug("External file addition detected: {dir}{file:E}", dirPath, oldPath);
+					VirtualFile newFile = new(oldPath.FileName, file.Hash, vfsAccessor.Value.VFS.LazyFetchFileInfo);
+
+					dir.AddFile(newFile, oldPath);
+					vfsAccessor.Value.VFS.TryIncreaseLazyCacheCount(newFile);
+				}
+				else if (oldFile.Hash != file.Hash)
+				{
+					// file is changed, invalidate descriptors
+					this._logger.LogDebug("External file modification detected: {dir}/{file}, from {oldHash} to {newHash}",
+						dirPath, oldPath, oldFile.Hash, file.Hash);
+					oldFile.Hash = file.Hash;
+					oldFile.PhysicalFileLazy = vfsAccessor.Value.VFS.LazyFetchFileInfo;
+					oldFile.InvalidateCachedPhysicalFile();
+					vfsAccessor.Value.VFS.TryIncreaseLazyCacheCount(oldFile);
+
+					VirtualPath path = oldFile.GetFullPath();
+					foreach (IDescriptor? item in descriptorAccessor.Value.Where(x => x.VirtualObject.GetFullPath() == path))
+						item.Invalidate();
+				}
+			}
+
+			// deleted files
+			List<FlattenedFile> flattenedFiles = dir.FlattenFiles(true);
+			foreach (FlattenedFile item in flattenedFiles)
+			{
+				if (newInfo.Files.Any(x => VirtualPath.FromFile(x.Path) == item.Path))
+					continue;
+
+				this._logger.LogDebug("External file removal detected: {dir}{file:E}", dirPath, item.Path);
+
+				// deleted file
+				foreach (IDescriptor? descriptor in descriptorAccessor.Value.Where(x => x.VirtualObject == item.File))
+					descriptor.Invalidate();
+
+				item.File.Parent?.Files.Remove(item.File);
+			}
+
+		CheckNameOnly:
+			string name = newInfo.GetDirectoryName();
+			dir.Name = name;
+		}
+	}
+	private void RealmAccess_BeatmapSetInfoChanged(IRealmCollection<BeatmapSetInfo> sender, ChangeSet? changes)
+	{
+		using ResourceAccessor<KeyedCollectionProxy<Guid, PartialBeatmapSetInfo>>.AccessorScope accessor = this._beatmapSetInfoCache.EnterAccessorScope();
+
+		this.UpdateVFSFromExternalChange(
+			sender,
+			changes,
+			accessor,
+			OsuVFSBaseDirectoryType.Songs,
+			x => new(x),
+			(vfs, x) => vfs.GetBeatMapDirectory(new(x)));
+	}
+	private void RealmAccess_SkinInfoChanged(IRealmCollection<SkinInfo> sender, ChangeSet? changes)
+	{
+		using ResourceAccessor<KeyedCollectionProxy<Guid, PartialSkinInfo>>.AccessorScope accessor = this._skinInfoCache.EnterAccessorScope();
+
+		this.UpdateVFSFromExternalChange(
+			sender,
+			changes,
+			accessor,
+			OsuVFSBaseDirectoryType.Skins,
+			x => new(x),
+			(vfs, x) => vfs.GetSkinDirectory(new(x)));
 	}
 
 	private void OsuVFS_RealmPostUpdate(VirtualDirectory skinOrSongDirectory, OsuVFSBaseDirectoryType type)
 	{
 		if (type == OsuVFSBaseDirectoryType.Songs)
 		{
-			BeatmapSetInfo? setInfo = this._osuVFS!.RealmAccess.Run(x => x.Find<BeatmapSetInfo>(skinOrSongDirectory.Identifier))
-				.ThrowIfNull();
+			using ResourceAccessor<MountedContext?>.AccessorScope accessor = this._mountedContext.EnterAccessorScope();
 
-			((IWorkingBeatmapCache)this._beatmapManager).Invalidate(setInfo);
+			this._logger.LogDebug("Invalidating beatmap set {set}", skinOrSongDirectory.Name);
+			accessor.Value.ThrowIfNull().VFS.RealmAccess.Run(x =>
+			{
+				BeatmapSetInfo? set = x.Find<BeatmapSetInfo>(skinOrSongDirectory.Identifier);
+				if (set is not null)
+					((IWorkingBeatmapCache)this._beatmapManager).Invalidate(set);
+			});
 		}
 	}
 	private void OsuVFS_RealmPreUpdate(VirtualDirectory skinOrSongDirectory, OsuVFSBaseDirectoryType type)
@@ -89,19 +290,23 @@ public class OsuVFSRulesetService : Service
 
 	public void Mount()
 	{
-		if (Interlocked.CompareExchange(ref this._hasMounted, 1, 0) != 0)
+		using ResourceAccessor<MountedContext?>.AccessorScope context = this._mountedContext.EnterAccessorScope();
+
+		if (context.Value is not null)
 			throw new InvalidOperationException("Service has already been started.");
 
 		// the args parameter is ignored, options should be set through the Options property before starting the service
-		this._osuVFS = new OsuVFS(this._realmAccess, this._fileDirectory, this.LoggerFactory.CreateLogger<OsuVFS>(), new()
+		OsuVFS vfs = new(this._realmAccess, this._fileDirectory, this.LoggerFactory.CreateLogger<OsuVFS>(), new()
 		{
 			ReadOnly = this.Options.ReadOnly,
 			VolumeLabel = "osu ruleset plugin"
 		});
-		this._host = new FileSystemHost(this._osuVFS);
+		FileSystemHost host = new(vfs);
 
-		this._osuVFS.RealmPreUpdate += this.OsuVFS_RealmPreUpdate;
-		this._osuVFS.RealmPostUpdate += this.OsuVFS_RealmPostUpdate;
+		context.Value = new(vfs, host);
+
+		vfs.RealmPreUpdate += this.OsuVFS_RealmPreUpdate;
+		vfs.RealmPostUpdate += this.OsuVFS_RealmPostUpdate;
 
 		List<char> freeDriveLetters = Helper.GetAvailableDriveLetters();
 		freeDriveLetters.Remove('A');
@@ -120,21 +325,36 @@ public class OsuVFSRulesetService : Service
 			mountPoint = desiredMountPoint + ":";
 		}
 
-		this._host.Mount(mountPoint);
+		host.Mount(mountPoint);
 	}
 
 	public void Unmount()
 	{
-		this._host?.Dispose();
-		this._host = null;
-		this._osuVFS = null;
+		this._mountedContext.Access((ref x) =>
+		{
+			if (x is null)
+				throw new InvalidOperationException("Service has not been started yet.");
 
-		this._hasMounted = 0;
+			x.VFS.RealmPostUpdate -= this.OsuVFS_RealmPostUpdate;
+			x.VFS.RealmPreUpdate -= this.OsuVFS_RealmPreUpdate;
+			x.Host.Unmount();
+			x.Host.Dispose();
+			x = null;
+		});
 	}
 
 	protected override int ExceptionHandler(Exception ex)
 	{
 		this._logger.LogError(ex, "An unhandled exception occurred.");
 		return base.ExceptionHandler(ex);
+	}
+
+	protected override void OnStop()
+	{
+		this._beatmapSubscription.Dispose();
+		this._skinSubscription.Dispose();
+		this._beatmapSetInfoCache.Dispose();
+		this._skinInfoCache.Dispose();
+		base.OnStop();
 	}
 }
