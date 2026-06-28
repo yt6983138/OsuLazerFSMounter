@@ -40,7 +40,7 @@ public class OsuLogger<T> : ILogger<T>
 	public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
 	{
 		string message = formatter(state, exception);
-		message = $"[{this._categoryName}] ({eventId.Id}) {message}";
+		message = $"[{this._categoryName}] ({eventId.Id}) {message} {exception}";
 
 		OsuLogLevel osuLogLevel = logLevel switch
 		{
