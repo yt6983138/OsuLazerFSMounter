@@ -77,6 +77,18 @@ public partial class OsuVFSSettingsSubsection : RulesetSettingsSubsection
 	{
 		OsuVFSRulesetConfigManager config = (OsuVFSRulesetConfigManager)this.Config;
 
+		FormCheckBox readonlyCheckbox = new()
+		{
+			Caption = "Readonly",
+			Current = config.GetBindable<bool>(OsuVFSRulesetOptions.ReadOnly),
+		};
+		FormTextBox mountPointTextbox = new()
+		{
+			Caption = "Mount Point",
+			Current = config.GetBindable<string>(OsuVFSRulesetOptions.MountPoint),
+			HintText = @"The path to mount the VFS at. (e.g. C:\VFS, F:, or leave empty to let the system choose)",
+		};
+
 		SettingsButtonV2 mountButton = new()
 		{
 			Width = 0.5f,
@@ -94,18 +106,22 @@ public partial class OsuVFSSettingsSubsection : RulesetSettingsSubsection
 		{
 			mountButton.Enabled.Value = false;
 			this.RulesetService.Options = new(
-				config.Get<OsuVFSMountPoint>(OsuVFSRulesetOptions.MountPoint),
+				config.Get<string>(OsuVFSRulesetOptions.MountPoint),
 				config.Get<bool>(OsuVFSRulesetOptions.ReadOnly));
 			try
 			{
 				this.RulesetService.Mount();
 				this._unmountButton.Enabled.Value = true;
+				mountPointTextbox.Current.Disabled = true;
+				readonlyCheckbox.Current.Disabled = true;
 			}
 			catch (Exception ex)
 			{
 				this.Logger.LogError(ex, "Failed to mount VFS.");
 
 				mountButton.Enabled.Value = true;
+				mountPointTextbox.Current.Disabled = false;
+				readonlyCheckbox.Current.Disabled = false;
 			}
 		};
 		this._unmountButton.Action = () =>
@@ -115,26 +131,22 @@ public partial class OsuVFSSettingsSubsection : RulesetSettingsSubsection
 			{
 				this.RulesetService.Unmount();
 				mountButton.Enabled.Value = true;
+				mountPointTextbox.Current.Disabled = false;
+				readonlyCheckbox.Current.Disabled = false;
 			}
 			catch (Exception ex)
 			{
 				this.Logger.LogError(ex, "Failed to unmount VFS.");
 				this._unmountButton.Enabled.Value = true;
+				mountPointTextbox.Current.Disabled = true;
+				readonlyCheckbox.Current.Disabled = true;
 			}
 		};
 
 		this.Children =
 		[
-			new SettingsItemV2(new FormCheckBox()
-			{
-				Caption = "Readonly",
-				Current = config.GetBindable<bool>(OsuVFSRulesetOptions.ReadOnly),
-			}),
-			new SettingsItemV2(new FormEnumDropdown<OsuVFSMountPoint>()
-			{
-				Caption = "Mount Point",
-				Current = config.GetBindable<OsuVFSMountPoint>(OsuVFSRulesetOptions.MountPoint)
-			}),
+			new SettingsItemV2( readonlyCheckbox),
+			new SettingsItemV2( mountPointTextbox),
 			new FillFlowContainer
 			{
 				RelativeSizeAxes = Axes.X,

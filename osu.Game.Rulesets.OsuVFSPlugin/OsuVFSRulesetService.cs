@@ -64,7 +64,7 @@ public class OsuVFSRulesetService : Service
 
 			field = value;
 		}
-	} = new(OsuVFSMountPoint.Auto, true);
+	} = new("", true);
 
 	public OsuVFSRulesetService(
 		RealmAccess realmAccess,
@@ -308,24 +308,18 @@ public class OsuVFSRulesetService : Service
 		vfs.RealmPreUpdate += this.OsuVFS_RealmPreUpdate;
 		vfs.RealmPostUpdate += this.OsuVFS_RealmPostUpdate;
 
-		List<char> freeDriveLetters = Helper.GetAvailableDriveLetters();
-		freeDriveLetters.Remove('A');
-		freeDriveLetters.Remove('B');
-
-		string mountPoint;
-		if (this.Options.MountPoint == OsuVFSMountPoint.Auto)
+		string? mountPoint = null;
+		if (!string.IsNullOrEmpty(this.Options.MountPoint))
 		{
-			mountPoint = freeDriveLetters[0] + ":";
-		}
-		else
-		{
-			char desiredMountPoint = this.Options.MountPoint.ToString()[0];
-			if (!freeDriveLetters.Contains(desiredMountPoint))
-				desiredMountPoint = freeDriveLetters[0];
-			mountPoint = desiredMountPoint + ":";
+			// this is important, if the mount point is not trimmed the CreateFileW will throw `read access violation. **FilePart** was nullptr.`
+			mountPoint = this.Options.MountPoint.Trim().TrimEnd('\\', '/');
 		}
 
-		host.Mount(mountPoint);
+		int result = host.Mount(mountPoint);
+		if (result != FileSystemBase.STATUS_SUCCESS)
+		{
+			throw new InvalidOperationException($"Failed to mount the filesystem. Error code: {result:X}");
+		}
 	}
 
 	public void Unmount()
