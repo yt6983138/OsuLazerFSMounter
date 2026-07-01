@@ -1,5 +1,6 @@
 ﻿using Fsp;
 using Microsoft.Extensions.Logging;
+using osu.Framework.Logging;
 using osu.Framework.Platform;
 using osu.Game.Beatmaps;
 using osu.Game.Database;
@@ -9,6 +10,8 @@ using OsuLazerFSMounter;
 using OsuLazerFSMounter.FileSystem;
 using OsuLazerFSMounter.Utility;
 using Realms;
+using LogLevel = Microsoft.Extensions.Logging.LogLevel;
+using OsuLogLevel = osu.Framework.Logging.LogLevel;
 
 namespace osu.Game.Rulesets.OsuVFSPlugin;
 public class OsuVFSRulesetService : Service
@@ -33,6 +36,19 @@ public class OsuVFSRulesetService : Service
 				int code = _instance.Run();
 				if (code != 0)
 					_instance._logger.LogError("Service exited with code {code:X}.", code);
+			});
+			host.UpdateThread.Scheduler.AddOnce(() =>
+			{
+				try
+				{
+					using IDisposable _ = realmAccess.BlockAllOperations("[OsuVFS] Backup");
+
+					realmAccess.CreateBackup(realmAccess.Filename.Replace(".realm", ".osuvfsbak.realm"));
+				}
+				catch (Exception ex)
+				{
+					_instance._logger.LogError(ex, "Failed to save a backup of realm database.");
+				}
 			});
 		}
 		return _instance;
@@ -84,11 +100,7 @@ public class OsuVFSRulesetService : Service
 		this.LoggerFactory = Microsoft.Extensions.Logging.LoggerFactory.Create(x => x
 			.AddProvider(new OsuLoggerProvider())
 			.SetMinimumLevel(
-#if DEBUG
-				LogLevel.Debug
-#else
-				LogLevel.Information
-#endif
+				Logger.Level == OsuLogLevel.Debug ? LogLevel.Debug : LogLevel.Information
 			));
 
 		this._realmAccess = realmAccess;
