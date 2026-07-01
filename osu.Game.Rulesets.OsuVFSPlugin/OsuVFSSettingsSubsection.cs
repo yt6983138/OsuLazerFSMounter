@@ -8,6 +8,8 @@ using osu.Game.Beatmaps;
 using osu.Game.Database;
 using osu.Game.Graphics.UserInterfaceV2;
 using osu.Game.Input.Bindings;
+using osu.Game.Overlays;
+using osu.Game.Overlays.Dialog;
 using osu.Game.Overlays.Settings;
 using osu.Game.Screens.Select;
 using osu.Game.Skinning;
@@ -33,6 +35,8 @@ public partial class OsuVFSSettingsSubsection : RulesetSettingsSubsection
 	private OsuGame Game { get; set; } = null!;
 	[Resolved]
 	private GameHost Host { get; set; } = null!;
+	[Resolved]
+	private IDialogOverlay DialogOverlay { get; set; } = null!;
 
 	private DirectoryInfo FileDirectory
 	{
@@ -92,12 +96,23 @@ public partial class OsuVFSSettingsSubsection : RulesetSettingsSubsection
 		{
 			Caption = "Readonly",
 			Current = config.GetBindable<bool>(OsuVFSRulesetOptions.ReadOnly),
+			HintText = "Warning: This is HIGHLY EXPERIMENTAL and may cause data loss. Only disable this if you know what you're doing.",
 		};
 		FormTextBox mountPointTextbox = new()
 		{
 			Caption = "Mount Point",
 			Current = config.GetBindable<string>(OsuVFSRulesetOptions.MountPoint),
 			HintText = @"The path to mount the VFS at. (e.g. C:\VFS, F:, or leave empty to let the system choose)",
+		};
+
+		readonlyCheckbox.ValueChanged += () =>
+		{
+			if (readonlyCheckbox.Current.Value == true) return;
+
+			this.DialogOverlay.Push(new ConfirmDialog("Are you sure you want to enable read-write mode? It is a HIGHLY EXPERIMENTAL feature and may cause data loss.", () =>
+			{
+				readonlyCheckbox.Current.Value = false;
+			}, () => readonlyCheckbox.Current.Value = true));
 		};
 
 		SettingsButtonV2 mountButton = new()
