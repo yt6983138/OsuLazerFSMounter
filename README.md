@@ -11,6 +11,8 @@ This is a tool to mount osu!lazer's hash-based file storage (User file storage) 
 Core:
 - [x] Mount as a virtual drive
 - [x] Reading
+    - [x] Skins
+    - [x] Beatmaps
 - [x] Writing, Deleting, Renaming/Moving
     - [x] Skins
     - [x] Beatmaps (need to update their corresponding collection, and individual beatmap hash)
@@ -20,6 +22,8 @@ Core:
 CLI:
 - [x] Mount as a virtual drive
 - [x] Reading
+    - [x] Skins
+    - [x] Beatmaps
 - [ ] Writing, Deleting, Renaming/Moving
     - [x] Without osu running
     - [ ] With osu running (live mode)
@@ -31,9 +35,13 @@ CLI:
 Plugin (as a fake ruleset):
 - [x] Mount as a virtual drive
 - [x] Reading
-    - [x] Update the filesystem when a beatmap/skin is added, modified, or removed
-- [ ] Writing, Deleting, Renaming/Moving
+    - [x] Update the filesystem when something is added, modified, or removed
+        - [x] Skins
+        - [x] Beatmaps
+- [x] Writing, Deleting, Renaming/Moving
     - [ ] Invalidate all internal game cache when filesystem is written
+        - [ ] Beatmap (Warning: cache invalidation is kinda broken, and may cause various issues like unable to load song)
+        - [x] Skins (doesn't really have cache so it works fine)
 - [ ] Interface
     - [x] Mount button
     - [x] Unmount button
