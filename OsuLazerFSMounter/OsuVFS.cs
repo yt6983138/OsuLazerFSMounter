@@ -319,7 +319,7 @@ public class OsuVFS : FileSystemBase
 				}
 
 				string md5Hash;
-				using (FileStream stream = entry.File.PhysicalFile.OpenRead())
+				using (FileStream stream = entry.File.PhysicalFile.Open(FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
 				{
 					md5Hash = Convert.ToHexString(MD5.HashData(stream)).ToLower();
 				}
@@ -342,7 +342,7 @@ public class OsuVFS : FileSystemBase
 				// osu.Game/Beatmaps/BeatmapImporter.cs line 35
 				if (!item.Path.FileName.EndsWith(".osu", StringComparison.OrdinalIgnoreCase)) continue;
 
-				using FileStream stream = item.File.PhysicalFile.OpenRead();
+				using FileStream stream = item.File.PhysicalFile.Open(FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
 				hasher.AppendStream(stream);
 			}
 			byte[] hashBytes = hasher.GetHashAndReset();
@@ -383,9 +383,9 @@ public class OsuVFS : FileSystemBase
 		};
 	}
 
-	private FileStream OpenStreamDefault(FileInfo info, FileMode mode = FileMode.Open, FileAccess access = FileAccess.ReadWrite, FileShare share = FileShare.ReadWrite | FileShare.Delete)
+	private FileStream OpenStreamDefault(FileInfo info, FileMode mode = FileMode.Open, FileAccess? access = null, FileShare share = FileShare.ReadWrite | FileShare.Delete)
 	{
-		return info.Open(mode, access, share);
+		return info.Open(mode, access ?? (this.Option.ReadOnly ? FileAccess.Read : FileAccess.ReadWrite), share);
 	}
 
 	private static void SetNormalizedPath(VirtualPath path, out string NormalizedName)
@@ -563,11 +563,16 @@ public class OsuVFS : FileSystemBase
 		this._logger.LogTrace("Closed: {FileDesc}", FileDesc);
 
 		using ResourceAccessor<VirtualDirectory>.AccessorScope accessor = this.RootDirectory.EnterAccessorScope();
+		using DisposeBlock _ = new(() =>
+		{
+			descriptor.Dispose();
+			this.OpenDescriptors.Access((ref x) => x.Remove(descriptor));
+		});
 
 		if (this.Option.ReadOnly)
-			goto Dispose;
+			return;
 		if (descriptor.Invalidated)
-			goto Dispose;
+			return;
 
 		if (descriptor.DeleteOnClose)
 		{
@@ -588,7 +593,7 @@ public class OsuVFS : FileSystemBase
 
 			this._logger.LogDebug("{type} removed", vObj.GetType().Name);
 
-			goto Dispose;
+			return;
 		}
 
 		if (descriptor is FileDescriptor fileDesc && fileDesc.HasEverWritten)
@@ -597,7 +602,7 @@ public class OsuVFS : FileSystemBase
 			byte[] hash = SHA256.HashData(fileDesc.Stream);
 			string hashString = Convert.ToHexString(hash).ToLower();
 
-			if (fileDesc.File.Hash == hashString) goto Dispose;
+			if (fileDesc.File.Hash == hashString) return;
 
 			FileInfo newFile = new(BuildHashFilePath(this.FilesFolder.FullName, hashString));
 
@@ -619,10 +624,6 @@ public class OsuVFS : FileSystemBase
 			dirDesc.Directory.HasBeenRenamed = false;
 			this.UpdateRealm(dirDesc.Directory, accessor.Value);
 		}
-
-	Dispose:
-		descriptor.Dispose();
-		this.OpenDescriptors.Access((ref x) => x.Remove(descriptor));
 	}
 	public override void Cleanup(object FileNode, object FileDesc, string FileName, uint Flags)
 	{
