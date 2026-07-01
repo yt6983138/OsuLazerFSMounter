@@ -9,6 +9,7 @@ using osu.Game.Database;
 using osu.Game.Graphics.UserInterfaceV2;
 using osu.Game.Input.Bindings;
 using osu.Game.Overlays.Settings;
+using osu.Game.Screens.Select;
 using osu.Game.Skinning;
 using OsuLazerFSMounter;
 using System.Runtime.CompilerServices;
@@ -16,6 +17,9 @@ using System.Runtime.CompilerServices;
 namespace osu.Game.Rulesets.OsuVFSPlugin;
 public partial class OsuVFSSettingsSubsection : RulesetSettingsSubsection
 {
+	[UnsafeAccessor(UnsafeAccessorKind.Field, Name = "carousel")]
+	private static extern ref BeatmapCarousel GetBeatmapCarousel(SongSelect self);
+
 	private readonly Ruleset _ruleset;
 	private SettingsButtonV2 _unmountButton = null!;
 
@@ -27,6 +31,8 @@ public partial class OsuVFSSettingsSubsection : RulesetSettingsSubsection
 	private SkinManager SkinManager { get; set; } = null!;
 	[Resolved]
 	private OsuGame Game { get; set; } = null!;
+	[Resolved]
+	private GameHost Host { get; set; } = null!;
 
 	private DirectoryInfo FileDirectory
 	{
@@ -40,8 +46,13 @@ public partial class OsuVFSSettingsSubsection : RulesetSettingsSubsection
 			static extern ref Storage GetStorage(RealmAccess realmAccess);
 		}
 	}
-	public OsuVFSRulesetService RulesetService
-		=> OsuVFSRulesetService.GetOrCreateInstance(this.RealmAccess, this.FileDirectory, this.BeatmapManager, this.SkinManager);
+	public OsuVFSRulesetService RulesetService => OsuVFSRulesetService.GetOrCreateInstance(
+		this.RealmAccess,
+		this.FileDirectory,
+		this.BeatmapManager,
+		this.SkinManager,
+		this.Game,
+		this.Host);
 	private ILogger<OsuVFSSettingsSubsection> Logger
 	{
 		get
@@ -145,8 +156,8 @@ public partial class OsuVFSSettingsSubsection : RulesetSettingsSubsection
 
 		this.Children =
 		[
-			new SettingsItemV2( readonlyCheckbox),
-			new SettingsItemV2( mountPointTextbox),
+			new SettingsItemV2(readonlyCheckbox),
+			new SettingsItemV2(mountPointTextbox),
 			new FillFlowContainer
 			{
 				RelativeSizeAxes = Axes.X,

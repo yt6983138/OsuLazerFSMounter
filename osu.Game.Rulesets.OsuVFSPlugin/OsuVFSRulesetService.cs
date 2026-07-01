@@ -1,7 +1,9 @@
 ﻿using Fsp;
 using Microsoft.Extensions.Logging;
+using osu.Framework.Platform;
 using osu.Game.Beatmaps;
 using osu.Game.Database;
+using osu.Game.Screens.Select;
 using osu.Game.Skinning;
 using OsuLazerFSMounter;
 using OsuLazerFSMounter.FileSystem;
@@ -19,11 +21,13 @@ public class OsuVFSRulesetService : Service
 		RealmAccess realmAccess,
 		DirectoryInfo fileDirector,
 		BeatmapManager beatmapManager,
-		SkinManager skinManager)
+		SkinManager skinManager,
+		OsuGame game,
+		GameHost host)
 	{
 		if (_instance is null)
 		{
-			_instance = new(realmAccess, fileDirector, beatmapManager, skinManager);
+			_instance = new(realmAccess, fileDirector, beatmapManager, skinManager, game, host);
 			Task.Run(() =>
 			{
 				int code = _instance.Run();
@@ -33,6 +37,7 @@ public class OsuVFSRulesetService : Service
 		}
 		return _instance;
 	}
+
 	public static OsuVFSRulesetService GetInstance()
 		=> _instance ?? throw new InvalidOperationException("Service has not been created yet. Call GetOrCreateInstance first.");
 
@@ -41,6 +46,8 @@ public class OsuVFSRulesetService : Service
 	private readonly ILogger<OsuVFSRulesetService> _logger;
 	private readonly BeatmapManager _beatmapManager;
 	private readonly SkinManager _skinManager;
+	private readonly OsuGame _game;
+	private readonly GameHost _host;
 
 	private readonly IDisposable _beatmapSubscription;
 	private readonly IDisposable _skinSubscription;
@@ -70,7 +77,9 @@ public class OsuVFSRulesetService : Service
 		RealmAccess realmAccess,
 		DirectoryInfo fileDirectory,
 		BeatmapManager beatmapManager,
-		SkinManager skinManager) : base(nameof(OsuVFSRuleset))
+		SkinManager skinManager,
+		OsuGame game,
+		GameHost host) : base(nameof(OsuVFSRuleset))
 	{
 		this.LoggerFactory = Microsoft.Extensions.Logging.LoggerFactory.Create(x => x
 			.AddProvider(new OsuLoggerProvider())
@@ -87,6 +96,8 @@ public class OsuVFSRulesetService : Service
 		this._logger = this.LoggerFactory.CreateLogger<OsuVFSRulesetService>();
 		this._beatmapManager = beatmapManager;
 		this._skinManager = skinManager;
+		this._game = game;
+		this._host = host;
 
 		this._beatmapSubscription = this._realmAccess.RegisterForNotifications(x => x.All<BeatmapSetInfo>(), this.RealmAccess_BeatmapSetInfoChanged);
 		this._skinSubscription = this._realmAccess.RegisterForNotifications(x => x.All<SkinInfo>(), this.RealmAccess_SkinInfoChanged);
@@ -279,8 +290,32 @@ public class OsuVFSRulesetService : Service
 			accessor.Value.ThrowIfNull().VFS.RealmAccess.Run(x =>
 			{
 				BeatmapSetInfo? set = x.Find<BeatmapSetInfo>(skinOrSongDirectory.Identifier);
-				if (set is not null)
-					((IWorkingBeatmapCache)this._beatmapManager).Invalidate(set);
+				if (set is null)
+				{
+					this._logger.LogWarning("Cannot find set currently updating: {id}", skinOrSongDirectory.Identifier);
+					return;
+				}
+
+				((IWorkingBeatmapCache)this._beatmapManager).Invalidate(set);
+
+				if (this._game.ScreenStack.CurrentScreen is not SongSelect songSelect)
+				{
+					this._logger.LogDebug("Not in song select, skipping invalidation.");
+					return;
+				}
+
+				if (songSelect.Beatmap.Value.BeatmapSetInfo.ID != set.ID)
+					return;
+
+				// TODO: reloading current beatmap this way is extremely buggy, and may randomly throw IOException, also sometimes the game says "oh the hash isn't same, no i ain't loading that"
+				// maybe i shouldnt do it in such invasive way?
+				this._host.UpdateThread.Scheduler.AddOnce(async () =>
+				{
+					WorkingBeatmap currentBeatmap = songSelect.Beatmap.Value;
+					songSelect.Beatmap.SetDefault();
+					await Task.Delay(200);
+					songSelect.Beatmap.Value = currentBeatmap;
+				});
 			});
 		}
 	}
