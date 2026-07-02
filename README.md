@@ -2,9 +2,15 @@
 
 This is a tool to mount osu!lazer's hash-based file storage (User file storage) as a virtual drive on Windows. It allows you to access the game's files directly from the mounted drive, making it easier to view.
 
-> Warning: This tool is in very WIP stage, and is NOT thoroughly tested (yet).
+> [!WARNING]
+> This tool is in very WIP stage, and is NOT thoroughly tested (yet).
 
-> Warning: Modifying the hash-based storage is not recommended from osu official, use this tool at your own risk.
+> [!WARNING]
+> **[From osu official]**
+>
+> Modifying the hash-based storage is not recommended, use this tool at your own risk. 
+> Further more, I have been informed that *the use of "plugin style ruleset" with online system can lead to ban or permanent marks on profile*. 
+> The plugin will automatically log you out when you start the game.
 
 ## Status
 
@@ -48,3 +54,7 @@ Plugin (as a fake ruleset):
     - [x] Toggle read-write/read-only
     - [x] Reload skin
     - [ ] Reload beatmap (?)
+
+## Installation
+
+You need to have [WinFsp v2.1](https://github.com/winfsp/winfsp/releases/tag/v2.1) installed, in order for this to work.
