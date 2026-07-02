@@ -29,6 +29,10 @@ public partial class OsuVFSIconInjection : SpriteIcon
 	[Resolved]
 	private IAPIProvider API { get; set; } = null!;
 
+	protected override bool OnClick(ClickEvent e)
+	{
+		return true;
+	}
 	protected override void LoadComplete()
 	{
 		base.LoadComplete();
