@@ -5,7 +5,7 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<LangVersion>preview</LangVersion>
-		
+
 		<!-- bruh they injected custom checks for releases, and they seems to have CLR swapped to prevent debugging -->
 		<AssemblyName>osu.Game.Rulesets.OsuVFSPlug1n</AssemblyName>
 	</PropertyGroup>
