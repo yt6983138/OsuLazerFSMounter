@@ -7,11 +7,9 @@ using osu.Framework.Platform;
 using osu.Game.Beatmaps;
 using osu.Game.Database;
 using osu.Game.Graphics.UserInterfaceV2;
-using osu.Game.Input.Bindings;
 using osu.Game.Overlays;
 using osu.Game.Overlays.Dialog;
 using osu.Game.Overlays.Settings;
-using osu.Game.Screens.Select;
 using osu.Game.Skinning;
 using OsuLazerFSMounter;
 using System.Runtime.CompilerServices;
@@ -19,10 +17,6 @@ using System.Runtime.CompilerServices;
 namespace osu.Game.Rulesets.OsuVFSPlugin;
 public partial class OsuVFSSettingsSubsection : RulesetSettingsSubsection
 {
-	[UnsafeAccessor(UnsafeAccessorKind.Field, Name = "carousel")]
-	private static extern ref BeatmapCarousel GetBeatmapCarousel(SongSelect self);
-
-	private readonly Ruleset _ruleset;
 	private SettingsButtonV2 _unmountButton = null!;
 
 	[Resolved]
@@ -68,23 +62,14 @@ public partial class OsuVFSSettingsSubsection : RulesetSettingsSubsection
 
 	protected override LocalisableString Header => nameof(OsuVFS);
 
-	public OsuVFSSettingsSubsection(Ruleset ruleset) : base(ruleset)
-	{
-		this._ruleset = ruleset;
-	}
+	public OsuVFSSettingsSubsection(Ruleset ruleset) : base(ruleset) { }
 
 	protected override void LoadComplete()
 	{
 		base.LoadComplete();
 		this._unmountButton.Enabled.Value = false;
-
-		// maybe i should find somewhere else to register components? since this will only be loaded when the user opens the settings menu
-		DatabasedKeyBindingContainer<OsuVFSKeyBind> container = new(this._ruleset.RulesetInfo, 0)
-		{
-			new OsuVFSKeyBindHandler(this.SkinManager, this.RealmAccess)
-		};
-		this.Game.Add(container);
 	}
+
 #pragma warning disable IDE1006 // Naming Styles
 	[BackgroundDependencyLoader]
 	private void load()

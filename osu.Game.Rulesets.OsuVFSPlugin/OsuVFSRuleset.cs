@@ -1,4 +1,6 @@
-﻿using osu.Framework.Input.Bindings;
+﻿using osu.Framework.Graphics;
+using osu.Framework.Graphics.Sprites;
+using osu.Framework.Input.Bindings;
 using osu.Framework.Logging;
 using osu.Game.Beatmaps;
 using osu.Game.Configuration;
@@ -52,6 +54,14 @@ public partial class OsuVFSRuleset : Ruleset
 		return [
 			new(keys: new(InputKey.Control, InputKey.Alt, InputKey.Shift, InputKey.S), OsuVFSKeyBind.ReloadSkin)
 		];
+	}
+
+	public override Drawable CreateIcon()
+	{
+		if (!this.IsSupported)
+			return new SpriteIcon { Icon = FontAwesome.Solid.QuestionCircle, Colour = Colour4.Transparent };
+
+		return new OsuVFSIconInjection(this);
 	}
 
 	#region Required dummy implementations
